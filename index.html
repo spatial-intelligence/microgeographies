@@ -10,6 +10,7 @@
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon.svg">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 </head>
 <body>
   <header>
@@ -22,6 +23,7 @@
       <h2>1. Photo</h2>
       <input type="file" id="fileInput" accept="image/*" capture="environment">
       <p class="hint">On a phone this opens the camera. GPS is read at send time so the photo location can be mapped later.</p>
+      <p id="exifOut">No photo yet.</p>
       <canvas id="photoCanvas"></canvas>
     </section>
 
@@ -71,6 +73,9 @@
       <h3>Depth (blue far, red near)</h3>
       <img id="depthImg" alt="Colorized monocular depth map" hidden>
       <p class="hint" id="depthNote">No depth map yet — it arrives with the next Send.</p>
+      <h3>Map (camera + pins)</h3>
+      <div id="map"></div>
+      <p class="hint" id="mapNote">No pins yet — they arrive with the next Send.</p>
       <details>
         <summary>Raw JSON</summary>
         <pre id="rawOut">{}</pre>
@@ -81,6 +86,8 @@
   </main>
 
   <script src="config.js"></script>
+  <script src="exif.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

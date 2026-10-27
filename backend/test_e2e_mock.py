@@ -81,4 +81,20 @@ assert j5["gps_source"] == "exif", j5
 assert abs(j5["location"]["lat"] - 51.5) < 1e-4, j5
 assert "geo" in j5["detections"][0], j5
 
+# 6. single-origin page serving: API routes keep precedence over static
+r6 = c.get("/")
+assert r6.status_code == 200 and "<title>Microgeographies" in r6.text, r6.status_code
+r7 = c.get("/app.js")
+assert r7.status_code == 200 and "renderMap" in r7.text
+print("static page serving OK (API precedence intact: see sections 1-5)")
+
+# 7. depth visualization + 3D fields ride along on every endpoint
+assert str(j.get("depth_png", "")).startswith("data:image/png;base64,"), "detect depth_png"
+assert str(j3.get("depth_png", "")).startswith("data:image/png;base64,"), "project depth_png"
+assert str(j4.get("depth_png", "")).startswith("data:image/png;base64,"), "depth depth_png"
+enu = door["geo"]["enu_m"]
+assert set(enu) == {"x", "y", "z"}, enu
+assert door["geo"]["pixel"] == {"x": 200, "y": 150}, door["geo"]
+print("depth_png + enu_m + pixel OK")
+
 print("ALL E2E OK")

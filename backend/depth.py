@@ -35,7 +35,15 @@ SNAP_LABELS = {"door", "doors", "doorway", "entrance", "gate", "window", "window
 EARTH_R_M = 6371000.0
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
+# No transformers-native Depth Anything V3 checkpoint exists yet (the V3
+# weights on HF are ONNX/mobile ports), so V2-Small stays the default.
+# Point DEPTH_MODEL_ID at another AutoModelForDepthEstimation id — e.g.
+# depth-anything/Depth-Anything-V2-Base-hf — to swap without code changes.
+DEFAULT_DEPTH_MODEL = os.environ.get(
+    "DEPTH_MODEL_ID", "LiheYoung/depth-anything-small-hf")
+
 _depth_model = None  # lazy (processor, model, device)
+_depth_model_id = None
 
 
 # --------------------------------------------------------------------------
@@ -212,6 +220,18 @@ def _dms_to_deg(dms):
     return d + m / 60.0 + s / 3600.0
 
 
+def _gps_ifd(pil_image):
+    """Raw EXIF GPS IFD dict, or ``{}`` when the photo carries none."""
+    try:
+        exif = pil_image.getexif()
+        if not exif:
+            return {}
+        gps_ifd = exif.get_ifd(0x8825) if hasattr(exif, "get_ifd") else {}
+        return gps_ifd or {}
+    except Exception:
+        return {}
+
+
 def extract_exif_gps(pil_image):
     """Return ``{"lat", "lon"}`` from JPEG EXIF GPS, else ``None``.
 
@@ -219,10 +239,7 @@ def extract_exif_gps(pil_image):
     simply yields ``None`` so the pipeline can fall back to the live fix.
     """
     try:
-        exif = pil_image.getexif()
-        if not exif:
-            return None
-        gps_ifd = exif.get_ifd(0x8825) if hasattr(exif, "get_ifd") else {}
+        gps_ifd = _gps_ifd(pil_image)
         if not gps_ifd:
             return None
         lat = _dms_to_deg(gps_ifd[2])
@@ -238,12 +255,36 @@ def extract_exif_gps(pil_image):
         return None
 
 
-def resolve_location(explicit_lat, explicit_lon, pil_image):
-    """Phone fix wins; otherwise EXIF GPS; otherwise ``None``.
+def extract_exif_heading(pil_image):
+    """Camera compass bearing from EXIF GPSImgDirection, else ``None``.
 
-    Returns ``(location_dict_or_None, source)`` where source is one of
-    ``"live"``, ``"exif"``, ``"none"``.
+    Only true-north references (``GPSImgDirectionRef = "T"``) are trusted;
+    magnetic ("M") readings need a declination model we do not carry, so
+    they are ignored rather than used wrong. Never raises.
     """
+    try:
+        gps_ifd = _gps_ifd(pil_image)
+        if 0x0011 not in gps_ifd:
+            return None
+        if str(gps_ifd.get(0x0010, "T")).upper() != "T":
+            return None
+        hdg = _rational_to_float(gps_ifd[0x0011]) % 360.0
+        return round(hdg, 2) if math.isfinite(hdg) else None
+    except Exception:
+        return None
+
+
+def resolve_location(explicit_lat, explicit_lon, pil_image):
+    """Photo EXIF GPS wins; otherwise the explicit (live) fix; else ``None``.
+
+    A saved photo was taken somewhere else, so its own metadata beats
+    wherever this computer happens to be now. Returns
+    ``(location_dict_or_None, source)`` with source ``"exif"``,
+    ``"live"``, or ``"none"``.
+    """
+    exif = extract_exif_gps(pil_image)
+    if exif:
+        return exif, "exif"
     try:
         lat = float(explicit_lat) if explicit_lat not in (None, "") else None
         lon = float(explicit_lon) if explicit_lon not in (None, "") else None
@@ -251,9 +292,24 @@ def resolve_location(explicit_lat, explicit_lon, pil_image):
         lat, lon = None, None
     if lat is not None and lon is not None:
         return {"lat": lat, "lon": lon}, "live"
-    exif = extract_exif_gps(pil_image)
-    if exif:
-        return exif, "exif"
+    return None, "none"
+
+
+def resolve_heading(explicit_heading, pil_image):
+    """Deliberate manual heading wins, else EXIF direction, else ``None``.
+
+    Returns ``(heading_deg_or_None, source)`` with source ``"manual"``,
+    ``"exif"``, or ``"none"``.
+    """
+    try:
+        hdg = float(explicit_heading) if explicit_heading not in (None, "") else None
+    except (TypeError, ValueError):
+        hdg = None
+    if hdg is not None and math.isfinite(hdg):
+        return ((hdg % 360.0 + 360.0) % 360.0), "manual"
+    exif_hdg = extract_exif_heading(pil_image)
+    if exif_hdg is not None:
+        return exif_hdg, "exif"
     return None, "none"
 
 
@@ -267,9 +323,10 @@ def mock_depth_grid(grid_w=80, grid_h=60):
             for r in range(grid_h)]
 
 
-def _load_depth_model(model_id="LiheYoung/depth-anything-small-hf"):
-    global _depth_model
-    if _depth_model is not None:
+def _load_depth_model(model_id=None):
+    global _depth_model, _depth_model_id
+    model_id = model_id or DEFAULT_DEPTH_MODEL
+    if _depth_model is not None and _depth_model_id == model_id:
         return _depth_model
     import torch
     from transformers import AutoImageProcessor, AutoModelForDepthEstimation
@@ -278,6 +335,7 @@ def _load_depth_model(model_id="LiheYoung/depth-anything-small-hf"):
     model = AutoModelForDepthEstimation.from_pretrained(model_id).to(device)
     model.eval()
     _depth_model = (processor, model, device)
+    _depth_model_id = model_id
     return _depth_model
 
 
@@ -285,16 +343,15 @@ def estimate_depth_grid(pil_image, grid_w=80, grid_h=60, model_id=None):
     """Relative depth as a grid_h x grid_w nested list, 0 = far, 1 = near.
 
     Uses ``MOCK_DEPTH=1`` gradient when set (tests, offline dev),
-    otherwise Depth Anything Small via transformers (downloads ~100 MB
-    of weights on first use). The full-resolution prediction is min-max
-    normalized then downsampled to the grid by block averaging.
+    otherwise the depth model via transformers (downloads weights on
+    first use). The full-resolution prediction is min-max normalized
+    then downsampled to the grid by block averaging.
     """
     if os.getenv("MOCK_DEPTH") == "1":
         return {"grid": mock_depth_grid(grid_w, grid_h), "mock": True}
     import torch
     rgb = pil_image.convert("RGB")
-    processor, model, device = _load_depth_model(
-        model_id or "LiheYoung/depth-anything-small-hf")
+    processor, model, device = _load_depth_model(model_id)
     inputs = processor(images=rgb, return_tensors="pt").to(device)
     with torch.no_grad():
         pred = model(**inputs).predicted_depth[0]

@@ -13,7 +13,10 @@
     sendBtn = $("sendBtn"), statusOut = $("statusOut"),
     canvas = $("photoCanvas"), boxList = $("boxList"),
     depthImg = $("depthImg"), depthNote = $("depthNote"),
+    mapNote = $("mapNote"),
     rawOut = $("rawOut"), exportBtn = $("exportBtn"), pngBtn = $("pngBtn");
+
+  let map = null, mapLayers = null;
 
   let imgEl = null, fileBlob = null, boxes = [], gps = null, lastRaw = {};
   let sentSize = null; // pixel size of the image SAM actually saw
@@ -71,6 +74,36 @@
     return headingDeg;
   }
 
+  // EXIF preview at load time: says what the photo carries and what the
+  // backend will therefore use, before anything is sent.
+  function previewExif(file) {
+    exifOut.textContent = "Reading photo metadata…";
+    if (/heic|heif/i.test(file.type) || /\.hei[cf]$/i.test(file.name || "")) {
+      exifOut.textContent = "HEIC photo — direction/location tags can't be read here. Convert to JPEG first, or use live GPS + manual heading.";
+      return;
+    }
+    file.arrayBuffer().then((buf) => {
+      const ex = window.MG_EXIF ? window.MG_EXIF.parseGPS(buf) : null;
+      if (!ex || !ex.hasExif) {
+        exifOut.textContent = "No EXIF in this photo (screenshot, PNG, or stripped upload) — the live fix will be used. Press Get GPS location, and capture or type the heading.";
+        return;
+      }
+      const bits = [];
+      if (ex.lat != null && ex.lon != null) bits.push(`location ${ex.lat.toFixed(6)}, ${ex.lon.toFixed(6)}`);
+      if (ex.heading != null) bits.push(`heading ${ex.heading}°`);
+      if (!bits.length) {
+        exifOut.textContent = "Photo has EXIF but no GPS location — the live fix will be used. Press Get GPS location, and capture or type the heading.";
+        return;
+      }
+      const used = [];
+      if (ex.lat != null) used.push("location");
+      if (ex.heading != null && currentHeading() == null) used.push("heading");
+      exifOut.textContent = `Photo EXIF holds ${bits.join(" + ")} — will be used (${used.join(" + ")}), not this computer's.`;
+    }).catch(() => {
+      exifOut.textContent = "Could not read photo metadata — the live fix will be used.";
+    });
+  }
+
   // Secure-context note (geolocation needs HTTPS, localhost counts as secure).
   $("secureNote").textContent = window.isSecureContext
     ? "Secure context — GPS available."
@@ -85,10 +118,13 @@
   modelInput.addEventListener("change", () => localStorage.setItem("mg.model", modelInput.value));
   tokenInput.addEventListener("change", () => localStorage.setItem("mg.token", tokenInput.value));
 
+  const exifOut = $("exifOut");
+
   fileInput.addEventListener("change", () => {
     const f = fileInput.files[0];
     if (!f) return;
     fileBlob = f;
+    previewExif(f);
     const url = URL.createObjectURL(f);
     const img = new Image();
     img.onload = () => {
@@ -141,7 +177,7 @@
       // backend projector (depth + heading + OSM snap) when possible.
       let extra = "";
       if (data.meta) extra = await projectMetaBoxes(data);
-      else { extra = gpsNote(data.gps_source); showDepth(data.depth_png); }
+      else { extra = gpsNote(data.gps_source) + headingNote(data); showDepth(data.depth_png); }
       draw(); renderList();
       exportBtn.disabled = boxes.length === 0;
       pngBtn.disabled = boxes.length === 0;
@@ -151,6 +187,7 @@
         setStatus(`Done — ${boxes.length} box(es).`);
       }
       if (extra) setStatus(statusOut.textContent + extra);
+      renderMap();
     } catch (e) {
       setStatus(`Error: ${e.message}`, true);
     }
@@ -188,8 +225,9 @@
   // Absence of a backend (static hosting) is not an error — boxes stay.
   // Returns a status suffix ("" when nothing to report).
   async function projectMetaBoxes(data) {
+    // No manual heading is fine: the backend falls back to the photo's
+    // EXIF direction when present.
     const hdg = currentHeading();
-    if (hdg == null) return " No heading — projection skipped.";
     if (!imgEl || !data.sentW) return "";
     const k = imgEl.naturalWidth / canvas.width; // canvas px -> uploaded-original px
     const payload = boxes.map((b) => ({
@@ -201,7 +239,7 @@
     fd.append("image", fileBlob);
     fd.append("boxes", JSON.stringify(payload));
     if (gps) { fd.append("lat", String(gps.lat)); fd.append("lon", String(gps.lon)); }
-    fd.append("heading", String(hdg));
+    if (hdg != null) fd.append("heading", String(hdg));
     fd.append("hfov", hfovInput.value || "60");
     fd.append("max_range", rangeInput.value || "30");
     let res;
@@ -220,7 +258,17 @@
       if (d.geo_error) boxes[i].geo_error = d.geo_error;
     });
     const n = (proj.detections || []).filter((d) => d.geo).length;
-    return gpsNote(proj.gps_source) + (n ? ` ${n} pin(s) projected.` : "");
+    return gpsNote(proj.gps_source) + headingNote(proj) +
+      (n ? ` ${n} pin(s) projected.`
+         : (proj.heading_source === "none" ? " No heading — projection skipped." : ""));
+  }
+
+  function headingNote(proj) {
+    if (proj.heading_source === "exif" && proj.heading_deg != null) {
+      if (!headingInput.value) headingOut.textContent = `Heading ${proj.heading_deg}° (from photo EXIF).`;
+      return ` Heading ${proj.heading_deg}° from photo EXIF.`;
+    }
+    return "";
   }
 
   // Meta Responses API, matching the proven Colab shape: one request per
@@ -542,6 +590,47 @@
     depthImg.src = dataUrl;
     depthImg.hidden = false;
     depthNote.textContent = "Monocular depth — blue far, red near. Warm areas are closer to the camera.";
+  }
+
+  // Map view: camera fix plus one marker per projected pin, each popup
+  // carrying label, distance, azimuth and ENU. Needs the Leaflet CDN;
+  // without it (offline) the list below still carries every number.
+  function renderMap() {
+    if (!window.L) {
+      mapNote.textContent = "Map library unavailable (needs internet for tiles) — pins are listed above.";
+      return;
+    }
+    const cam = gps ? { lat: gps.lat, lon: gps.lon } : (lastRaw.location || null);
+    const pins = boxes.filter((b) => b.geo).map((b) => ({ b, p: pinOf(b) })).filter((x) => x.p);
+    if (!cam && !pins.length) {
+      mapNote.textContent = "No pins yet — they arrive with the next Send.";
+      return;
+    }
+    if (!map) {
+      map = window.L.map("map");
+      window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19, attribution: "&copy; OpenStreetMap contributors"
+      }).addTo(map);
+    }
+    if (mapLayers) mapLayers.remove();
+    mapLayers = window.L.layerGroup().addTo(map);
+    const bounds = [];
+    if (cam) {
+      window.L.marker([cam.lat, cam.lon]).addTo(mapLayers).bindPopup("Camera");
+      bounds.push([cam.lat, cam.lon]);
+    }
+    pins.forEach(({ b, p }) => {
+      const g = b.geo;
+      const enu = g.enu_m ? `<br>x ${g.enu_m.x} m E, y ${g.enu_m.y} m N, z ${g.enu_m.z} m` : "";
+      const snap = b.snapped ? "<br>on building outline" : "";
+      window.L.marker([p.lat, p.lon]).addTo(mapLayers).bindPopup(
+        `<b>${b.label}</b><br>${g.distance_m.toFixed(1)} m @ ${g.bearing_deg.toFixed(1)}°${enu}${snap}`);
+      bounds.push([p.lat, p.lon]);
+    });
+    if (bounds.length > 1) map.fitBounds(bounds, { padding: [20, 20] });
+    else map.setView(bounds[0], 18);
+    mapNote.textContent = `${pins.length} pin(s)` +
+      (pins.some(({ b }) => b.snapped) ? " (door/window snapped to building outline)." : ".");
   }
 
   if ("serviceWorker" in navigator) {

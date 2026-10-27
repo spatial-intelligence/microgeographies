@@ -18,5 +18,7 @@ button.primary { font-weight: 700; }
 .hint { font-size: 0.85rem; opacity: 0.75; }
 #photoCanvas { width: 100%; margin-top: 8px; border: 1px solid #8886; border-radius: 4px; }
 #boxList { padding-left: 20px; }
+#depthImg { width: 100%; margin-top: 8px; border: 1px solid #8886; border-radius: 4px; }
+#map { height: 320px; margin-top: 8px; border: 1px solid #8886; border-radius: 4px; }
 #rawOut { overflow-x: auto; font-size: 0.75rem; max-height: 240px; overflow-y: auto; }
 #statusOut { font-weight: 600; }

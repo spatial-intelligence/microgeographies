@@ -8,12 +8,16 @@ full-resolution PNG of the annotated photo.
 ## Try it locally
 
 ```sh
-python3 -m http.server 8000
+./run.sh
 ```
 
 Open http://localhost:8000 in a browser. (`localhost` counts as a secure
-context, so GPS works without HTTPS.) Every Send goes to the real
-configured endpoint — there is no mock mode.
+context, so GPS works without HTTPS.) One server delivers both the page
+and the API, so depth maps, 3D pins, and the map view work on every
+path. Every Send goes to the real configured endpoint — there is no
+mock mode. Results show a turbo-colorized depth map, per-box
+pixel → ENU (x/y/z metres from the camera), and a map with the camera
+fix plus one marker per pin (label, distance, azimuth).
 
 ## Point it at SAM 3.1 (Meta)
 
@@ -43,12 +47,15 @@ Colab prototype — but masks are not drawn on the page yet.
 The collection pipeline turns each detection into an approximate map
 location for robot delivery-point microgeography:
 
-1. **Photo + location.** Take a photo in the page (live phone GPS) or
-   upload one later — the backend falls back to the JPEG's EXIF GPS
-   (`gps_source` in every reply is `live`, `exif`, or `none`).
-2. **Heading.** Capture the compass bearing (or type it) so each box
-   gets a true bearing via a pinhole camera model (`pixel_to_bearing`,
-   default 60° HFOV, adjustable).
+1. **Photo + location.** The photo's own EXIF GPS wins when present —
+   a saved photo was taken somewhere else, so its metadata beats
+   wherever this computer is now. Otherwise the live phone GPS is used
+   (`gps_source` in every reply is `exif`, `live`, or `none`).
+2. **Heading.** A typed/captured bearing wins; otherwise the photo's
+   EXIF direction (`GPSImgDirection`, true-north only — magnetic is
+   ignored) is used (`heading_source` is `manual`, `exif`, or `none`).
+   Each box gets a true bearing via a pinhole camera model
+   (`pixel_to_bearing`, default 60° HFOV, adjustable).
 3. **Monocular depth.** `backend/depth.py` runs Depth Anything Small
    (`LiheYoung/depth-anything-small-hf`, ~100 MB first download) to get
    relative depth; the median over each box is mapped linearly to

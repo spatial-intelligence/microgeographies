@@ -185,13 +185,36 @@ def test_exif_missing_is_none():
 
 
 def test_resolve_location_priority():
+    # The photo's own EXIF beats wherever this computer is now.
     img = _FakeImg(_gps_ifd("N", (51, 30, 0), "E", (0, 0, 0)))
     loc, src = resolve_location("52.0", "1.0", img)
+    assert src == "exif" and abs(loc["lat"] - 51.5) < 1e-6, (loc, src)
+    loc, src = resolve_location("52.0", "1.0", _FakeImg(None))
     assert (loc, src) == ({"lat": 52.0, "lon": 1.0}, "live")
-    loc, src = resolve_location("", "", img)
-    assert src == "exif" and abs(loc["lat"] - 51.5) < 1e-6
     loc, src = resolve_location("", "", _FakeImg(None))
     assert (loc, src) == (None, "none")
+
+
+def test_exif_heading_true_north():
+    from depth import extract_exif_heading
+    img = _FakeImg({0x0010: "T", 0x0011: (123, 1)})
+    assert extract_exif_heading(img) == 123.0
+
+
+def test_exif_heading_magnetic_ignored():
+    from depth import extract_exif_heading
+    img = _FakeImg({0x0010: "M", 0x0011: (123, 1)})
+    assert extract_exif_heading(img) is None
+    assert extract_exif_heading(_FakeImg(None)) is None
+
+
+def test_resolve_heading_priority():
+    from depth import resolve_heading
+    img = _FakeImg({0x0010: "T", 0x0011: (123, 1)})
+    # Deliberate manual heading beats the photo's own direction.
+    assert resolve_heading("90", img) == (90.0, "manual")
+    assert resolve_heading("", img) == (123.0, "exif")
+    assert resolve_heading("", _FakeImg(None)) == (None, "none")
 
 
 def test_mock_grid_shape_and_direction():

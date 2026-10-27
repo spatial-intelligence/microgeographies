@@ -3,9 +3,10 @@
 POST /api/detect with multipart fields:
   image: image file
   concepts: JSON array, e.g. ["door", "steps"]
-  lat, lon, accuracy: optional GPS strings (phone fix; EXIF GPS is used
-    as a fallback when they are empty, e.g. photo uploaded later)
-  heading: optional compass bearing of the camera axis, degrees
+  lat, lon, accuracy: optional GPS strings (used only when the photo
+    has no EXIF GPS — the photo's own location wins when present)
+  heading: optional compass bearing of the camera axis, degrees (wins
+    over the photo's EXIF direction; EXIF is used when this is empty)
   hfov: horizontal field of view, degrees (default 60)
   max_range: monocular-depth scale, metres mapped to the far end (default 30)
   project: "1" (default) attaches approx lat/lon per detection when a
@@ -91,6 +92,7 @@ async def detect(
     hfov: str = Form(default="60"),
     max_range: str = Form(default="30"),
     project: str = Form(default="1"),
+    model: str = Form(default=""),
 ):
     raw = await image.read()
     pil = Image.open(io.BytesIO(raw)).convert("RGB")
@@ -106,6 +108,7 @@ async def detect(
         return {"error": "no concepts given", "detections": []}
 
     location, gps_source = geo.resolve_location(lat, lon, pil)
+    heading_deg, heading_source = geo.resolve_heading(heading, pil)
 
     if os.getenv("MOCK_SAM") == "1":
         dets = mock_detections(w, h, names)
@@ -127,10 +130,11 @@ async def detect(
                              "score": float(score)})
     depth_png = None
     if project == "1":
-        grid, depth_error = get_depth(pil)
+        grid, depth_error = get_depth(pil, model_id=model or None)
         depth_png = geo.depth_data_url(grid) if grid else None
-        dets = project_boxes(pil, dets, location, heading, hfov, max_range,
-                             grid=grid, depth_error=depth_error)
+        dets = project_boxes(pil, dets, location,
+                             "" if heading_deg is None else str(heading_deg),
+                             hfov, max_range, grid=grid, depth_error=depth_error)
     return {
         "detections": dets,
         "image_width": w,
@@ -138,14 +142,16 @@ async def detect(
         "gps": {"lat": lat, "lon": lon, "accuracy": accuracy},
         "location": location,
         "gps_source": gps_source,  # "live" | "exif" | "none"
+        "heading_deg": heading_deg,  # resolved manual > EXIF > None
+        "heading_source": heading_source,  # "manual" | "exif" | "none"
         "depth_png": depth_png,  # turbo-colorized depth map (blue far → red near)
     }
 
 
-def get_depth(pil):
+def get_depth(pil, model_id=None):
     """Relative-depth grid for an image, or (None, error) when unavailable."""
     try:
-        return geo.estimate_depth_grid(pil)["grid"], None
+        return geo.estimate_depth_grid(pil, model_id=model_id)["grid"], None
     except Exception as e:
         return None, f"depth unavailable: {e}"
 
@@ -206,6 +212,7 @@ async def project(
     heading: str = Form(default=""),
     hfov: str = Form(default="60"),
     max_range: str = Form(default="30"),
+    model: str = Form(default=""),
 ):
     """Project externally produced boxes (e.g. Meta SAM-3.1 in the browser).
 
@@ -223,21 +230,25 @@ async def project(
     if not isinstance(dets, list):
         return {"error": "boxes must be a JSON array", "detections": []}
     location, gps_source = geo.resolve_location(lat, lon, pil)
-    grid, depth_error = get_depth(pil)
-    dets = project_boxes(pil, dets, location, heading, hfov, max_range,
-                         grid=grid, depth_error=depth_error)
+    heading_deg, heading_source = geo.resolve_heading(heading, pil)
+    grid, depth_error = get_depth(pil, model_id=model or None)
+    dets = project_boxes(pil, dets, location,
+                         "" if heading_deg is None else str(heading_deg),
+                         hfov, max_range, grid=grid, depth_error=depth_error)
     return {"detections": dets, "location": location, "gps_source": gps_source,
+            "heading_deg": heading_deg, "heading_source": heading_source,
             "depth_png": geo.depth_data_url(grid) if grid else None}
 
 
 @app.post("/api/depth")
-async def depth_map(image: UploadFile = File(...)):
+async def depth_map(image: UploadFile = File(...),
+                    model: str = Form(default="")):
     """Monocular relative-depth grid for an image, plus any EXIF GPS."""
     raw = await image.read()
     pil = Image.open(io.BytesIO(raw)).convert("RGB")
     w, h = pil.size
     try:
-        result = geo.estimate_depth_grid(pil)
+        result = geo.estimate_depth_grid(pil, model_id=model or None)
     except Exception as e:
         return {"error": f"depth unavailable: {e}",
                 "image_width": w, "image_height": h}
@@ -252,5 +263,19 @@ async def depth_map(image: UploadFile = File(...)):
         "depth_max": max(flat),
         "mock": result["mock"],
         "exif_gps": geo.extract_exif_gps(pil),
+        "exif_heading": geo.extract_exif_heading(pil),
         "depth_png": geo.depth_data_url(result["grid"]),
     }
+
+
+# Single-origin serving: the page and the API share one host:port so the
+# browser's Meta-direct path can reach /api/project without CORS or
+# cross-port failures (which previously broke depth + pins silently).
+# Mounted AFTER every /api/* route above so the API takes precedence.
+try:
+    from fastapi.staticfiles import StaticFiles
+    from pathlib import Path
+    app.mount("/", StaticFiles(directory=Path(__file__).resolve().parent.parent,
+                               html=True), name="page")
+except Exception:
+    pass  # API-only mode when staticfiles is unavailable
