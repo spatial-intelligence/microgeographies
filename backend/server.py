@@ -37,6 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
 import depth as geo
+import merge as mg
 
 app = FastAPI()
 app.add_middleware(
@@ -93,6 +94,7 @@ async def detect(
     max_range: str = Form(default="30"),
     project: str = Form(default="1"),
     model: str = Form(default=""),
+    prefer: str = Form(default=""),
 ):
     raw = await image.read()
     pil = Image.open(io.BytesIO(raw)).convert("RGB")
@@ -107,27 +109,10 @@ async def detect(
     if not names:
         return {"error": "no concepts given", "detections": []}
 
-    location, gps_source = geo.resolve_location(lat, lon, pil)
+    location, gps_source = geo.resolve_location(lat, lon, pil, prefer=prefer or "exif")
     heading_deg, heading_source = geo.resolve_heading(heading, pil)
 
-    if os.getenv("MOCK_SAM") == "1":
-        dets = mock_detections(w, h, names)
-    else:
-        import torch
-
-        model, processor = load_model()
-        dets = []
-        for label in names:
-            inputs = processor(images=pil, text=label, return_tensors="pt").to(model.device)
-            with torch.no_grad():
-                res = model(**inputs)
-            parsed = processor.post_process_instance_segmentation(
-                res, threshold=0.5, mask_threshold=0.5,
-                target_sizes=inputs.get("original_sizes").tolist(),
-            )[0]
-            for box, score in zip(parsed["boxes"].tolist(), parsed["scores"].tolist()):
-                dets.append({"label": label, "box": [round(float(v)) for v in box],
-                             "score": float(score)})
+    dets = run_detections(pil, names)
     depth_png = None
     if project == "1":
         grid, depth_error = get_depth(pil, model_id=model or None)
@@ -146,6 +131,41 @@ async def detect(
         "heading_source": heading_source,  # "manual" | "exif" | "none"
         "depth_png": depth_png,  # turbo-colorized depth map (blue far → red near)
     }
+
+
+def run_detections(pil, names):
+    """SAM boxes (mock or real) for one image; shared by detect + batch."""
+    w, h = pil.size
+    if os.getenv("MOCK_SAM") == "1":
+        return mock_detections(w, h, names)
+    import torch
+
+    model, processor = load_model()
+    dets = []
+    for label in names:
+        inputs = processor(images=pil, text=label, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            res = model(**inputs)
+        parsed = processor.post_process_instance_segmentation(
+            res, threshold=0.5, mask_threshold=0.5,
+            target_sizes=inputs.get("original_sizes").tolist(),
+        )[0]
+        for box, score in zip(parsed["boxes"].tolist(), parsed["scores"].tolist()):
+            dets.append({"label": label, "box": [round(float(v)) for v in box],
+                         "score": float(score)})
+    return dets
+
+
+def thumbnail_data_url(pil, max_w=480):
+    """Downscaled JPEG preview of an image as a data URL."""
+    import base64
+    import io as _io
+    img = pil.copy()
+    img.thumbnail((max_w, max_w * 4))
+    buf = _io.BytesIO()
+    img.save(buf, "JPEG", quality=70)
+    return ("data:image/jpeg;base64,"
+            + base64.b64encode(buf.getvalue()).decode("ascii"))
 
 
 def get_depth(pil, model_id=None):
@@ -213,6 +233,7 @@ async def project(
     hfov: str = Form(default="60"),
     max_range: str = Form(default="30"),
     model: str = Form(default=""),
+    prefer: str = Form(default=""),
 ):
     """Project externally produced boxes (e.g. Meta SAM-3.1 in the browser).
 
@@ -229,7 +250,7 @@ async def project(
         return {"error": "boxes is not valid JSON", "detections": []}
     if not isinstance(dets, list):
         return {"error": "boxes must be a JSON array", "detections": []}
-    location, gps_source = geo.resolve_location(lat, lon, pil)
+    location, gps_source = geo.resolve_location(lat, lon, pil, prefer=prefer or "exif")
     heading_deg, heading_source = geo.resolve_heading(heading, pil)
     grid, depth_error = get_depth(pil, model_id=model or None)
     dets = project_boxes(pil, dets, location,
@@ -265,6 +286,107 @@ async def depth_map(image: UploadFile = File(...),
         "exif_gps": geo.extract_exif_gps(pil),
         "exif_heading": geo.extract_exif_heading(pil),
         "depth_png": geo.depth_data_url(result["grid"]),
+    }
+
+
+MAX_BATCH_IMAGES = 20
+MAX_BATCH_BYTES = 200 * 1024 * 1024
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+
+
+@app.post("/api/batch")
+async def batch(
+    zipfile: UploadFile = File(...),
+    concepts: str = Form(...),
+    lat: str = Form(default=""),
+    lon: str = Form(default=""),
+    heading: str = Form(default=""),
+    hfov: str = Form(default="60"),
+    max_range: str = Form(default="30"),
+    model: str = Form(default=""),
+    prefer: str = Form(default=""),
+    merge_radius_m: str = Form(default="8"),
+    sim_min: str = Form(default="0.75"),
+):
+    """Batch-process a zip of photos; merge repeats into shared features.
+
+    Each image runs the full detect + project pipeline (EXIF-first
+    location/heading per photo, explicit lat/lon/heading as fallback),
+    and returns its preview, detections, and depth map. Same-label
+    detections then merge across photos when they sit within
+    ``merge_radius_m`` metres AND their box crops look alike
+    (similarity >= ``sim_min``) — positional-error duplicates fuse,
+    while genuinely separate neighbours stay distinct.
+    """
+    import zipfile as _zip
+
+    try:
+        names = json.loads(concepts)
+        if isinstance(names, str):
+            names = [names]
+    except json.JSONDecodeError:
+        names = [c.strip() for c in concepts.split(",") if c.strip()]
+    names = [n for n in names if n][:10]
+    if not names:
+        return {"error": "no concepts given", "images": [], "merged": None}
+    try:
+        radius = float(merge_radius_m or 8.0)
+    except ValueError:
+        radius = 8.0
+    try:
+        sim = float(sim_min or 0.75)
+    except ValueError:
+        sim = 0.75
+
+    raw = await zipfile.read()
+    try:
+        zf = _zip.ZipFile(io.BytesIO(raw))
+    except _zip.BadZipFile:
+        return {"error": "not a zip file", "images": [], "merged": None}
+    members = [i for i in zf.infolist()
+               if not i.is_dir() and i.filename.lower().endswith(IMAGE_EXTS)]
+    members.sort(key=lambda i: i.filename)
+    if sum(i.file_size for i in members) > MAX_BATCH_BYTES:
+        return {"error": "zip contents exceed 200 MB", "images": [],
+                "merged": None}
+
+    images = []
+    records = []
+    for info in members[:MAX_BATCH_IMAGES]:
+        try:
+            pil = Image.open(io.BytesIO(zf.read(info.filename))).convert("RGB")
+        except Exception:
+            continue
+        w, h = pil.size
+        location, gps_source = geo.resolve_location(lat, lon, pil, prefer=prefer or "exif")
+        hdg, hdg_source = geo.resolve_heading(heading, pil)
+        dets = mg.dedupe_same_image(run_detections(pil, names))
+        grid, depth_error = get_depth(pil, model_id=model or None)
+        dets = project_boxes(pil, dets, location,
+                             "" if hdg is None else str(hdg),
+                             hfov, max_range, grid=grid, depth_error=depth_error)
+        for d in dets:
+            if d.get("geo"):
+                records.append({
+                    "label": d.get("label", ""), "lat": d["geo"]["lat"],
+                    "lon": d["geo"]["lon"], "image": info.filename,
+                    "vec": mg.crop_vector(pil, d["box"]),
+                    "detail": {"distance_m": d["geo"].get("distance_m"),
+                               "bearing_deg": d["geo"].get("bearing_deg")},
+                })
+        images.append({
+            "name": info.filename, "image_width": w, "image_height": h,
+            "thumbnail": thumbnail_data_url(pil),
+            "depth_png": geo.depth_data_url(grid) if grid else None,
+            "location": location, "gps_source": gps_source,
+            "heading_deg": hdg, "heading_source": hdg_source,
+            "detections": dets,
+        })
+    clusters = mg.cluster(records, radius_m=radius, sim_min=sim)
+    return {
+        "images": images,
+        "skipped": max(0, len(members) - MAX_BATCH_IMAGES),
+        "merged": mg.merged_feature_collection(clusters),
     }
 
 

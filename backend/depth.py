@@ -274,14 +274,24 @@ def extract_exif_heading(pil_image):
         return None
 
 
-def resolve_location(explicit_lat, explicit_lon, pil_image):
-    """Photo EXIF GPS wins; otherwise the explicit (live) fix; else ``None``.
+def resolve_location(explicit_lat, explicit_lon, pil_image, prefer="exif"):
+    """Pick the camera location.
 
-    A saved photo was taken somewhere else, so its own metadata beats
-    wherever this computer happens to be now. Returns
-    ``(location_dict_or_None, source)`` with source ``"exif"``,
-    ``"live"``, or ``"none"``.
+    Default (``prefer="exif"``): the photo's EXIF GPS wins — a saved photo
+    was taken somewhere else, so its metadata beats wherever this computer
+    happens to be now — otherwise the explicit fix. With
+    ``prefer="manual"``, a deliberately typed correction wins over EXIF.
+    Source is ``"exif"``, ``"live"``, ``"manual"``, or ``"none"``.
     """
+    if prefer == "manual":
+        try:
+            lat = float(explicit_lat) if explicit_lat not in (None, "") else None
+            lon = float(explicit_lon) if explicit_lon not in (None, "") else None
+        except (TypeError, ValueError):
+            lat, lon = None, None
+        if (lat is not None and lon is not None
+                and -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            return {"lat": lat, "lon": lon}, "manual"
     exif = extract_exif_gps(pil_image)
     if exif:
         return exif, "exif"

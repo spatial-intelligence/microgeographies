@@ -14,11 +14,13 @@
     canvas = $("photoCanvas"), boxList = $("boxList"),
     depthImg = $("depthImg"), depthNote = $("depthNote"),
     mapNote = $("mapNote"),
-    rawOut = $("rawOut"), exportBtn = $("exportBtn"), pngBtn = $("pngBtn");
+    rawOut = $("rawOut"), exportBtn = $("exportBtn"), pngBtn = $("pngBtn"),
+    reprojectBtn = $("reprojectBtn");
 
   let map = null, mapLayers = null;
 
   let imgEl = null, fileBlob = null, boxes = [], gps = null, lastRaw = {};
+  let origBoxes = []; // last SAM boxes in uploaded-original pixels, for re-projection
   let sentSize = null; // pixel size of the image SAM actually saw
   let headingDeg = null; // compass bearing of the camera axis
 
@@ -119,6 +121,27 @@
   tokenInput.addEventListener("change", () => localStorage.setItem("mg.token", tokenInput.value));
 
   const exifOut = $("exifOut");
+  const manualLat = $("manualLat"), manualLon = $("manualLon");
+
+  // Typed correction wins over everything (photo EXIF and button fix).
+  function currentManual() {
+    const la = parseFloat(manualLat.value), lo = parseFloat(manualLon.value);
+    if (!Number.isFinite(la) || !Number.isFinite(lo)) return null;
+    if (la < -90 || la > 90 || lo < -180 || lo > 180) return null;
+    return { lat: la, lon: lo };
+  }
+
+  function locationFields(fd) {
+    const m = currentManual();
+    if (m) {
+      fd.append("lat", String(m.lat));
+      fd.append("lon", String(m.lon));
+      fd.append("prefer", "manual");
+    } else if (gps) {
+      fd.append("lat", String(gps.lat));
+      fd.append("lon", String(gps.lon));
+    }
+  }
 
   fileInput.addEventListener("change", () => {
     const f = fileInput.files[0];
@@ -129,7 +152,8 @@
     const img = new Image();
     img.onload = () => {
       imgEl = img; URL.revokeObjectURL(url); boxes = []; sentSize = null;
-      exportBtn.disabled = true; pngBtn.disabled = true;
+      origBoxes = [];
+      exportBtn.disabled = true; pngBtn.disabled = true; reprojectBtn.disabled = true;
       draw(); renderList();
     };
     img.onerror = () => setStatus("Could not read that image.", true);
@@ -173,14 +197,23 @@
       sentSize = (data.meta && data.sentW)
         ? { w: data.sentW, h: data.sentH }
         : { w: canvas.width, h: canvas.height };
+      draw(); renderList(); // SAM boxes on screen immediately
       // Meta-direct boxes carry no geo: run them through the Python
       // backend projector (depth + heading + OSM snap) when possible.
       let extra = "";
-      if (data.meta) extra = await projectMetaBoxes(data);
-      else { extra = gpsNote(data.gps_source) + headingNote(data); showDepth(data.depth_png); }
+      if (data.meta) {
+        setStatus(`SAM finished — ${boxes.length} box(es). Starting depth processing…`);
+        extra = await projectMetaBoxes(data);
+      }
+      else {
+        setStatus(`SAM finished — ${boxes.length} box(es). Starting depth processing…`);
+        extra = gpsNote(data.gps_source) + headingNote(data); showDepth(data.depth_png);
+        origBoxes = rawDetections(data); // backend boxes are already original-px
+      }
       draw(); renderList();
       exportBtn.disabled = boxes.length === 0;
       pngBtn.disabled = boxes.length === 0;
+      reprojectBtn.disabled = origBoxes.length === 0;
       if (data.meta && data.results.length > boxes.length) {
         setStatus(`Done — ${boxes.length} box(es) drawn (${data.results.length - boxes.length} dropped as invalid).`);
       } else {
@@ -201,7 +234,7 @@
     const fd = new FormData();
     fd.append("image", blob);
     fd.append("prompts", JSON.stringify(prompts));
-    if (gps) { fd.append("lat", String(gps.lat)); fd.append("lon", String(gps.lon)); }
+    locationFields(fd);
     const hdg = currentHeading();
     if (hdg != null) fd.append("heading", String(hdg));
     fd.append("hfov", hfovInput.value || "60");
@@ -215,6 +248,7 @@
 
   function gpsNote(src) {
     if (src === "exif") return " Location came from the photo EXIF.";
+    if (src === "manual") return " Location uses your typed correction.";
     if (src === "none") return " No location — projection skipped.";
     return "";
   }
@@ -235,10 +269,11 @@
       box: [b.x1 * k, b.y1 * k, b.x2 * k, b.y2 * k].map(Math.round),
       score: b.score,
     }));
+    origBoxes = payload; // stored for heading-free re-projection
     const fd = new FormData();
     fd.append("image", fileBlob);
     fd.append("boxes", JSON.stringify(payload));
-    if (gps) { fd.append("lat", String(gps.lat)); fd.append("lon", String(gps.lon)); }
+    locationFields(fd);
     if (hdg != null) fd.append("heading", String(hdg));
     fd.append("hfov", hfovInput.value || "60");
     fd.append("max_range", rangeInput.value || "30");
@@ -506,7 +541,8 @@
   function pinOf(b) {
     if (b.snapped) return { lon: b.snapped.lon, lat: b.snapped.lat, kind: "snapped" };
     if (b.geo) return { lon: b.geo.lon, lat: b.geo.lat, kind: "projected" };
-    if (gps) return { lon: gps.lon, lat: gps.lat, kind: "camera" };
+    const cam = currentManual() || gps;
+    if (cam) return { lon: cam.lon, lat: cam.lat, kind: "camera" };
     return null;
   }
 
@@ -585,6 +621,183 @@
     statusOut.style.color = isErr ? "#b00020" : "";
   }
 
+  // Batch: a zip of photos in, per-image previews + JSON plus one merged
+  // feature set out. Same origin (/api/batch) like /api/project.
+  const zipInput = $("zipInput"), batchBtn = $("batchBtn"), batchOut = $("batchOut"),
+    batchGrid = $("batchGrid"), mergedList = $("mergedList"), mergedBtn = $("mergedBtn"),
+    radiusInput = $("radiusInput"), simInput = $("simInput");
+  let lastBatch = null, batchLayers = null;
+
+  batchBtn.addEventListener("click", async () => {
+    const zf = zipInput.files[0];
+    if (!zf) { batchOut.textContent = "Pick a zip of photos first."; return; }
+    const prompts = promptsInput.value.split(",").map(s => s.trim()).filter(Boolean);
+    if (!prompts.length) { batchOut.textContent = "Enter at least one object prompt."; return; }
+    batchOut.textContent = "Processing… depth runs per photo, so a dozen images take a while.";
+    try {
+      const fd = new FormData();
+      fd.append("zipfile", zf);
+      fd.append("concepts", JSON.stringify(prompts));
+      locationFields(fd);
+      const hdg = currentHeading();
+      if (hdg != null) fd.append("heading", String(hdg));
+      fd.append("hfov", hfovInput.value || "60");
+      fd.append("max_range", rangeInput.value || "30");
+      fd.append("merge_radius_m", radiusInput.value || "8");
+      fd.append("sim_min", simInput.value || "0.75");
+      const res = await fetch("/api/batch", { method: "POST", body: fd });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      lastBatch = await res.json();
+      if (lastBatch.error) throw new Error(lastBatch.error);
+      renderBatch();
+      const n = lastBatch.merged ? lastBatch.merged.features.length : 0;
+      batchOut.textContent = `Done — ${lastBatch.images.length} photo(s)` +
+        (lastBatch.skipped ? ` (${lastBatch.skipped} skipped over the 20-photo cap)` : "") +
+        `, ${n} merged feature(s).`;
+    } catch (e) {
+      batchOut.textContent = `Error: ${e.message}`;
+    }
+  });
+
+  function saveJson(obj, filename) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" }));
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+
+  function renderBatch() {
+    batchGrid.innerHTML = "";
+    lastBatch.images.forEach((im, i) => {
+      const div = document.createElement("div");
+      div.className = "batch-item";
+      const img = document.createElement("img");
+      img.src = im.thumbnail;
+      img.alt = im.name;
+      div.appendChild(img);
+      const h = document.createElement("h4");
+      h.textContent = im.name;
+      div.appendChild(h);
+      const meta = document.createElement("div");
+      const loc = im.location ? `${im.location.lat.toFixed(5)}, ${im.location.lon.toFixed(5)}` : "no location";
+      meta.textContent = `${loc} (${im.gps_source}) — ${im.detections.length} box(es)`;
+      div.appendChild(meta);
+      const ul = document.createElement("ul");
+      im.detections.forEach((d) => {
+        const li = document.createElement("li");
+        li.textContent = d.geo
+          ? `${d.label}: ${d.geo.distance_m.toFixed(1)} m @ ${d.geo.bearing_deg.toFixed(1)}°`
+          : `${d.label}: no pin (${d.geo_error || "no location/heading"})`;
+        ul.appendChild(li);
+      });
+      div.appendChild(ul);
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = "Download JSON";
+      btn.addEventListener("click", () => saveJson({
+        image: im.name, location: im.location, gps_source: im.gps_source,
+        heading_deg: im.heading_deg, heading_source: im.heading_source,
+        detections: im.detections.map((d) => ({
+          label: d.label, score: d.score, box: d.box,
+          geo: d.geo || null, snapped: d.snapped || null
+        }))
+      }, im.name.replace(/\.[^.]+$/, "") + "-tagged.json"));
+      div.appendChild(btn);
+      batchGrid.appendChild(div);
+    });
+    mergedList.innerHTML = "";
+    const feats = (lastBatch.merged && lastBatch.merged.features) || [];
+    if (!feats.length) mergedList.innerHTML = '<li class="hint">Nothing merged — pins were too far apart or looked different.</li>';
+    feats.forEach((f) => {
+      const li = document.createElement("li");
+      const [lon, lat] = f.geometry.coordinates;
+      li.textContent = `${f.properties.label} ×${f.properties.count}: ` +
+        `${lat.toFixed(6)}, ${lon.toFixed(6)} (from ${f.properties.merged_from.map((m) => m.image).join(", ")})`;
+      mergedList.appendChild(li);
+    });
+    mergedBtn.disabled = feats.length === 0;
+    renderBatchPins(feats);
+  }
+
+  mergedBtn.addEventListener("click", () => {
+    if (lastBatch && lastBatch.merged) saveJson(lastBatch.merged, "microgeo-merged.json");
+  });
+
+  function renderBatchPins(feats) {
+    if (!window.L || !map) return;
+    if (batchLayers) batchLayers.remove();
+    if (!feats.length) return;
+    batchLayers = window.L.layerGroup().addTo(map);
+    const bounds = [];
+    feats.forEach((f) => {
+      const [lon, lat] = f.geometry.coordinates;
+      window.L.circleMarker([lat, lon], { radius: 8, color: "#b00020" })
+        .addTo(batchLayers)
+        .bindPopup(`<b>${f.properties.label} ×${f.properties.count}</b><br>merged pin`);
+      bounds.push([lat, lon]);
+    });
+    map.fitBounds(bounds, { padding: [20, 20] });
+  }
+
+  // Raw detections out of a backend reply, untouched by canvas scaling:
+  // [{label, box:[x1,y1,x2,y2] original-px, score}]. Our backend emits
+  // {box,label,score}; other shapes pass through box/bbox/xyxy arrays.
+  function rawDetections(data) {
+    let items = [];
+    if (data && typeof data === "object") {
+      if (Array.isArray(data.results)) items = data.results;
+      else if (Array.isArray(data.detections)) items = data.detections;
+      else if (Array.isArray(data.predictions)) items = data.predictions;
+    }
+    const out = [];
+    items.forEach((it, i) => {
+      const c = it.box || it.bbox || it.xyxy || null;
+      if (!Array.isArray(c) || c.length < 4) return;
+      const v = c.slice(0, 4).map(Number);
+      if (!v.every(Number.isFinite)) return;
+      out.push({ label: it.label || it.name || `object ${i + 1}`,
+                 box: v.map(Math.round),
+                 score: typeof it.score === "number" ? it.score : null });
+    });
+    return out;
+  }
+
+  // Re-run depth + geometry on the stored SAM boxes with the CURRENT
+  // heading / HFOV / range — no SAM call, so geometry can be iterated fast.
+  reprojectBtn.addEventListener("click", async () => {
+    if (!fileBlob || !origBoxes.length) return;
+    setStatus("Starting depth processing (stored boxes, no SAM)…");
+    try {
+      const fd = new FormData();
+      fd.append("image", fileBlob);
+      fd.append("boxes", JSON.stringify(origBoxes));
+      locationFields(fd);
+      const hdg = currentHeading();
+      if (hdg != null) fd.append("heading", String(hdg));
+      fd.append("hfov", hfovInput.value || "60");
+      fd.append("max_range", rangeInput.value || "30");
+      const res = await fetch("/api/project", { method: "POST", body: fd });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      const proj = await res.json();
+      showDepth(proj.depth_png);
+      let n = 0;
+      (proj.detections || []).forEach((d, i) => {
+        if (!boxes[i]) return;
+        boxes[i].geo = d.geo || null;
+        boxes[i].snapped = d.snapped || null;
+        boxes[i].geo_error = d.geo_error || null;
+        if (d.geo) n++;
+      });
+      lastRaw.location = proj.location || lastRaw.location;
+      renderList();
+      renderMap();
+      setStatus(`Re-projected — ${n} pin(s).` + gpsNote(proj.gps_source) + headingNote(proj));
+    } catch (e) {
+      setStatus(`Error: ${e.message}`, true);
+    }
+  });
+
   function showDepth(dataUrl) {
     if (!dataUrl) return;
     depthImg.src = dataUrl;
@@ -600,7 +813,7 @@
       mapNote.textContent = "Map library unavailable (needs internet for tiles) — pins are listed above.";
       return;
     }
-    const cam = gps ? { lat: gps.lat, lon: gps.lon } : (lastRaw.location || null);
+    const cam = currentManual() || (gps ? { lat: gps.lat, lon: gps.lon } : null) || (lastRaw.location || null);
     const pins = boxes.filter((b) => b.geo).map((b) => ({ b, p: pinOf(b) })).filter((x) => x.p);
     if (!cam && !pins.length) {
       mapNote.textContent = "No pins yet — they arrive with the next Send.";
@@ -616,7 +829,14 @@
     mapLayers = window.L.layerGroup().addTo(map);
     const bounds = [];
     if (cam) {
-      window.L.marker([cam.lat, cam.lon]).addTo(mapLayers).bindPopup("Camera");
+      const mk = window.L.marker([cam.lat, cam.lon], { draggable: true }).addTo(mapLayers);
+      mk.bindPopup("Camera — drag me to correct the fix");
+      mk.on("dragend", () => {
+        const p = mk.getLatLng();
+        manualLat.value = p.lat.toFixed(6);
+        manualLon.value = p.lng.toFixed(6);
+        mapNote.textContent = `Camera moved to ${p.lat.toFixed(6)}, ${p.lng.toFixed(6)} (manual override) — Send or Re-project to apply.`;
+      });
       bounds.push([cam.lat, cam.lon]);
     }
     pins.forEach(({ b, p }) => {

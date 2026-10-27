@@ -1,20 +1,36 @@
-:root { color-scheme: light dark; }
+:root { color-scheme: light dark; --accent: #2d6a4f; }
 * { box-sizing: border-box; }
 body {
-  margin: 0 auto; max-width: 640px; padding: 16px;
+  margin: 0 auto; max-width: 720px; padding: 16px;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   line-height: 1.45;
 }
-header h1 { font-size: 1.3rem; margin: 0 0 4px; }
-header h1 span { font-weight: 400; font-size: 1rem; }
+header {
+  background: #1a2b1f; color: #f2f5f1;
+  margin: -16px -16px 16px; padding: 16px 16px 12px;
+}
+header h1 { font-size: 1.25rem; margin: 0; letter-spacing: 0.01em; }
+header h1 .ver {
+  font-weight: 600; font-size: 0.75rem; vertical-align: middle;
+  border: 1px solid #ffffff66; border-radius: 999px; padding: 1px 8px; margin-left: 6px;
+}
+header .tagline { margin: 4px 0 0; font-size: 0.85rem; opacity: 0.8; }
 header p { margin: 0 0 12px; font-size: 0.85rem; }
+#secureNote { margin-top: 8px; font-size: 0.8rem; opacity: 0.75; }
 .card { border: 1px solid #8886; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
 .card h2 { font-size: 1rem; margin: 0 0 8px; }
 label { display: block; margin: 8px 0; font-size: 0.9rem; }
 label.row { display: flex; gap: 8px; align-items: center; }
 input[type="text"], input[type="password"] { display: block; width: 100%; margin-top: 4px; padding: 8px; font-size: 1rem; }
-button { padding: 10px 16px; font-size: 1rem; margin: 6px 6px 6px 0; cursor: pointer; }
-button.primary { font-weight: 700; }
+button { padding: 10px 16px; font-size: 1rem; margin: 6px 6px 6px 0; cursor: pointer; border-radius: 6px; border: 1px solid #8886; background: transparent; color: inherit; }
+button.primary { font-weight: 700; background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: 0.45; cursor: default; }
+.batch-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin-top: 8px; }
+.batch-item { border: 1px solid #8886; border-radius: 6px; padding: 8px; font-size: 0.85rem; }
+.batch-item img { width: 100%; border-radius: 4px; display: block; margin-bottom: 6px; }
+.batch-item h4 { margin: 0 0 4px; font-size: 0.9rem; overflow-wrap: anywhere; }
+.batch-item ul { margin: 4px 0; padding-left: 18px; }
+.batch-item button { padding: 6px 10px; font-size: 0.85rem; }
 .hint { font-size: 0.85rem; opacity: 0.75; }
 #photoCanvas { width: 100%; margin-top: 8px; border: 1px solid #8886; border-radius: 4px; }
 #boxList { padding-left: 20px; }

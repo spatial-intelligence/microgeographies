@@ -86,8 +86,21 @@ Pure geometry/EXIF helpers have unit tests with no model or network:
 
 ```sh
 .venv/bin/python backend/test_geo.py             # pure geometry/EXIF, no deps beyond Pillow
+.venv/bin/python backend/test_merge.py           # IoU dedupe, crop similarity, clustering
 .venv/bin/python backend/test_e2e_mock.py        # full HTTP loop, mock SAM + mock depth
+.venv/bin/python backend/test_osm_snap_stub.py   # OSM snap wiring via a local stub
 ```
+
+## Batch + merged map
+
+Section 6 takes a zip (up to 20 photos): each image runs the full
+pipeline with its own EXIF location/direction (live fix as fallback)
+and returns a preview, its pins, and a per-image JSON download.
+`POST /api/batch` also returns one merged GeoJSON: same-type pins fuse
+only when within `merge_radius_m` (default 8 m) *and* their box crops
+look alike (similarity ≥ `sim_min`, default 0.75) — repeat sightings of
+one bin collapse to a mean pin, while two genuinely separate bins stay
+distinct. Merged pins draw on the map as red circles.
 
 Run the backend with `MOCK_SAM=1 MOCK_DEPTH=1` for offline development
 (deterministic boxes + gradient depth, no downloads).

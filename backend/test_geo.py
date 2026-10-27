@@ -195,6 +195,16 @@ def test_resolve_location_priority():
     assert (loc, src) == (None, "none")
 
 
+def test_resolve_location_manual_prefer():
+    # A typed correction beats EXIF when prefer="manual".
+    img = _FakeImg(_gps_ifd("N", (51, 30, 0), "E", (0, 0, 0)))
+    loc, src = resolve_location("52.0", "1.0", img, prefer="manual")
+    assert (loc, src) == ({"lat": 52.0, "lon": 1.0}, "manual")
+    # Invalid manual values fall through to EXIF, not through to crash.
+    loc, src = resolve_location("999", "1.0", img, prefer="manual")
+    assert src == "exif", (loc, src)
+
+
 def test_exif_heading_true_north():
     from depth import extract_exif_heading
     img = _FakeImg({0x0010: "T", 0x0011: (123, 1)})
