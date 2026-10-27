@@ -1,4 +1,4 @@
-const CACHE = "microgeo-v9"; // bump whenever the shell changes, or updates never reach installed users
+const CACHE = "microgeo-v10"; // bump whenever the shell changes, or updates never reach installed users
 const SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./exif.js", "./config.js", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (e) => {
