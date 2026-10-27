@@ -9,9 +9,10 @@
     tokenInput = $("tokenInput"),
     sendBtn = $("sendBtn"), statusOut = $("statusOut"),
     canvas = $("photoCanvas"), boxList = $("boxList"),
-    rawOut = $("rawOut"), exportBtn = $("exportBtn");
+    rawOut = $("rawOut"), exportBtn = $("exportBtn"), pngBtn = $("pngBtn");
 
   let imgEl = null, fileBlob = null, boxes = [], gps = null, lastRaw = {};
+  let sentSize = null; // pixel size of the image SAM actually saw
 
   // Secure-context note (geolocation needs HTTPS, localhost counts as secure).
   $("secureNote").textContent = window.isSecureContext
@@ -33,7 +34,11 @@
     fileBlob = f;
     const url = URL.createObjectURL(f);
     const img = new Image();
-    img.onload = () => { imgEl = img; URL.revokeObjectURL(url); boxes = []; draw(); renderList(); };
+    img.onload = () => {
+      imgEl = img; URL.revokeObjectURL(url); boxes = []; sentSize = null;
+      exportBtn.disabled = true; pngBtn.disabled = true;
+      draw(); renderList();
+    };
     img.onerror = () => setStatus("Could not read that image.", true);
     img.src = url;
   });
@@ -72,12 +77,17 @@
       if (rescale !== 1) boxes.forEach((b) => {
         b.x1 *= rescale; b.x2 *= rescale; b.y1 *= rescale; b.y2 *= rescale;
       });
+      sentSize = (data.meta && data.sentW)
+        ? { w: data.sentW, h: data.sentH }
+        : { w: canvas.width, h: canvas.height };
+      draw(); renderList();
+      exportBtn.disabled = boxes.length === 0;
+      pngBtn.disabled = boxes.length === 0;
       if (data.meta && data.results.length > boxes.length) {
         setStatus(`Done — ${boxes.length} box(es) drawn (${data.results.length - boxes.length} dropped as invalid).`);
-        return;
+      } else {
+        setStatus(`Done — ${boxes.length} box(es).`);
       }
-      draw(); renderList(); exportBtn.disabled = boxes.length === 0;
-      setStatus(`Done — ${boxes.length} box(es).`);
     } catch (e) {
       setStatus(`Error: ${e.message}`, true);
     }
@@ -282,19 +292,50 @@
     canvas.width = Math.round(imgEl.naturalWidth * scale);
     canvas.height = Math.round(imgEl.naturalHeight * scale);
     ctx.drawImage(imgEl, 0, 0, canvas.width, canvas.height);
-    ctx.lineWidth = 3; ctx.font = "16px system-ui, sans-serif";
-    boxes.forEach((b, i) => {
+    paintBoxes(ctx, boxes, canvas.width);
+  }
+
+  // Draws labelled boxes on any 2D context. Line widths and text scale
+  // with the render width so exports stay legible at any resolution.
+  function paintBoxes(ctx, list, W) {
+    ctx.lineWidth = Math.max(2, Math.round(W / 220));
+    const fs = Math.max(12, Math.round(W / 40));
+    ctx.font = `${fs}px system-ui, sans-serif`;
+    list.forEach((b, i) => {
       const hue = (i * 67) % 360;
       ctx.strokeStyle = `hsl(${hue} 90% 35%)`;
       ctx.strokeRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
       const tag = b.score == null ? b.label : `${b.label} ${(b.score * 100).toFixed(0)}%`;
-      const w = ctx.measureText(tag).width + 12;
+      const w = ctx.measureText(tag).width + fs * 0.75;
+      const th = fs * 1.4;
       ctx.fillStyle = `hsl(${hue} 90% 35%)`;
-      ctx.fillRect(b.x1, Math.max(0, b.y1 - 22), w, 22);
+      ctx.fillRect(b.x1, Math.max(0, b.y1 - th), w, th);
       ctx.fillStyle = "#fff";
-      ctx.fillText(tag, b.x1 + 6, Math.max(14, b.y1 - 6));
+      ctx.fillText(tag, b.x1 + fs * 0.35, Math.max(fs, b.y1 - th * 0.28));
     });
   }
+
+  // Full-resolution export: re-renders the photo at the size SAM saw it
+  // with the boxes scaled up, then downloads a PNG.
+  pngBtn.addEventListener("click", () => {
+    if (!imgEl || !boxes.length || !sentSize) return;
+    const c = document.createElement("canvas");
+    c.width = sentSize.w; c.height = sentSize.h;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(imgEl, 0, 0, c.width, c.height);
+    const k = c.width / canvas.width;
+    paintBoxes(ctx, boxes.map((b) => ({
+      ...b, x1: b.x1 * k, y1: b.y1 * k, x2: b.x2 * k, y2: b.y2 * k
+    })), c.width);
+    c.toBlob((blob) => {
+      if (!blob) { setStatus("Image export failed.", true); return; }
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "microgeographies-annotated.png";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    }, "image/png");
+  });
 
   function renderList() {
     boxList.innerHTML = "";

@@ -2,7 +2,8 @@
 
 Test page: upload a photo (or use the phone camera), type object prompts
 (`door, steps`), grab GPS, send to SAM 3.1, draw the returned bounding
-boxes, export GeoJSON for mapping later.
+boxes, export GeoJSON for mapping later, and download a
+full-resolution PNG of the annotated photo.
 
 ## Try it locally
 
