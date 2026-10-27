@@ -1,0 +1,13 @@
+{
+  "name": "Microgeographies SAM test",
+  "short_name": "Microgeo",
+  "description": "Upload a photo, send it to SAM 3.1 with object prompts, get bounding boxes with GPS.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#101510",
+  "theme_color": "#1a2b1f",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

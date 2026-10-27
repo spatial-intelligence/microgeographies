@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Microgeographies — SAM test</title>
+  <meta name="description" content="Test page: upload a photo, send it to SAM 3.1 with object prompts, get bounding boxes back with GPS.">
+  <meta name="theme-color" content="#1a2b1f">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>Microgeographies <span>SAM test</span></h1>
+    <p id="secureNote"></p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>1. Photo</h2>
+      <input type="file" id="fileInput" accept="image/*" capture="environment">
+      <p class="hint">On a phone this opens the camera. GPS is read at send time so the photo location can be mapped later.</p>
+      <canvas id="photoCanvas"></canvas>
+    </section>
+
+    <section class="card">
+      <h2>2. Objects to find</h2>
+      <label>Prompts (comma separated)
+        <input type="text" id="promptsInput" value="door, steps" autocomplete="off">
+      </label>
+    </section>
+
+    <section class="card">
+      <h2>3. Location</h2>
+      <button type="button" id="gpsBtn">Get GPS location</button>
+      <p id="gpsOut">No location yet.</p>
+    </section>
+
+    <section class="card">
+      <h2>4. SAM API</h2>
+      <label>Endpoint
+        <input type="text" id="endpointInput" autocomplete="off" spellcheck="false">
+      </label>
+      <label>Token (kept in this browser only, never committed)
+        <input type="password" id="tokenInput" autocomplete="off">
+      </label>
+      <label class="row"><input type="checkbox" id="mockCheck"> Mock mode (no network — draws sample boxes)</label>
+      <button type="button" id="sendBtn" class="primary">Send to SAM</button>
+      <p id="statusOut" role="status"></p>
+    </section>
+
+    <section class="card">
+      <h2>5. Results</h2>
+      <ul id="boxList"><li class="hint">No results yet.</li></ul>
+      <details>
+        <summary>Raw JSON</summary>
+        <pre id="rawOut">{}</pre>
+      </details>
+      <button type="button" id="exportBtn" disabled>Download GeoJSON</button>
+    </section>
+  </main>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

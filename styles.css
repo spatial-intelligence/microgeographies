@@ -1,0 +1,22 @@
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0 auto; max-width: 640px; padding: 16px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.45;
+}
+header h1 { font-size: 1.3rem; margin: 0 0 4px; }
+header h1 span { font-weight: 400; font-size: 1rem; }
+header p { margin: 0 0 12px; font-size: 0.85rem; }
+.card { border: 1px solid #8886; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+.card h2 { font-size: 1rem; margin: 0 0 8px; }
+label { display: block; margin: 8px 0; font-size: 0.9rem; }
+label.row { display: flex; gap: 8px; align-items: center; }
+input[type="text"], input[type="password"] { display: block; width: 100%; margin-top: 4px; padding: 8px; font-size: 1rem; }
+button { padding: 10px 16px; font-size: 1rem; margin: 6px 6px 6px 0; cursor: pointer; }
+button.primary { font-weight: 700; }
+.hint { font-size: 0.85rem; opacity: 0.75; }
+#photoCanvas { width: 100%; margin-top: 8px; border: 1px solid #8886; border-radius: 4px; }
+#boxList { padding-left: 20px; }
+#rawOut { overflow-x: auto; font-size: 0.75rem; max-height: 240px; overflow-y: auto; }
+#statusOut { font-weight: 600; }
