@@ -5,8 +5,9 @@
 
   const fileInput = $("fileInput"), promptsInput = $("promptsInput"),
     gpsBtn = $("gpsBtn"), gpsOut = $("gpsOut"),
-    endpointInput = $("endpointInput"), tokenInput = $("tokenInput"),
-    mockCheck = $("mockCheck"), sendBtn = $("sendBtn"), statusOut = $("statusOut"),
+    endpointInput = $("endpointInput"), modelInput = $("modelInput"),
+    tokenInput = $("tokenInput"),
+    sendBtn = $("sendBtn"), statusOut = $("statusOut"),
     canvas = $("photoCanvas"), boxList = $("boxList"),
     rawOut = $("rawOut"), exportBtn = $("exportBtn");
 
@@ -19,10 +20,11 @@
 
   // Restore non-secret prefs; token lives in localStorage of this browser only.
   endpointInput.value = localStorage.getItem("mg.endpoint") || cfg.samEndpoint || "/api/sam";
+  modelInput.value = localStorage.getItem("mg.model") || cfg.metaModel || "sam-3.1";
   tokenInput.value = localStorage.getItem("mg.token") || "";
   promptsInput.value = cfg.defaultPrompts || "door, steps";
-  mockCheck.checked = cfg.mockByDefault !== false;
   endpointInput.addEventListener("change", () => localStorage.setItem("mg.endpoint", endpointInput.value));
+  modelInput.addEventListener("change", () => localStorage.setItem("mg.model", modelInput.value));
   tokenInput.addEventListener("change", () => localStorage.setItem("mg.token", tokenInput.value));
 
   fileInput.addEventListener("change", () => {
@@ -56,10 +58,24 @@
     if (!prompts.length) { setStatus("Enter at least one object prompt.", true); return; }
     setStatus("Sending…");
     try {
-      const data = mockCheck.checked ? mockResult(prompts) : await postSam(fileBlob, prompts);
+      const data = await postSam(fileBlob, prompts);
       lastRaw = data;
       rawOut.textContent = JSON.stringify(data, null, 2);
-      boxes = normalizeBoxes(data, canvas.width, canvas.height);
+      // Meta returns pixels in the sent image, but the canvas may differ
+      // in size — normalize at sent size, then scale to the canvas.
+      let NW = canvas.width, NH = canvas.height, rescale = 1;
+      if (data.meta && data.sentW) {
+        NW = data.sentW; NH = data.sentH;
+        rescale = canvas.width / NW;
+      }
+      boxes = normalizeBoxes(data, NW, NH);
+      if (rescale !== 1) boxes.forEach((b) => {
+        b.x1 *= rescale; b.x2 *= rescale; b.y1 *= rescale; b.y2 *= rescale;
+      });
+      if (data.meta && data.results.length > boxes.length) {
+        setStatus(`Done — ${boxes.length} box(es) drawn (${data.results.length - boxes.length} dropped as invalid).`);
+        return;
+      }
       draw(); renderList(); exportBtn.disabled = boxes.length === 0;
       setStatus(`Done — ${boxes.length} box(es).`);
     } catch (e) {
@@ -67,7 +83,11 @@
     }
   });
 
+  function isMetaEndpoint(url) { return /api\.meta\.ai/i.test(url); }
+
   async function postSam(blob, prompts) {
+    if (isMetaEndpoint(endpointInput.value)) return postSamMeta(blob, prompts);
+    // Generic detector-style backend: multipart image + JSON prompts.
     const fd = new FormData();
     fd.append("image", blob);
     fd.append("prompts", JSON.stringify(prompts));
@@ -79,18 +99,115 @@
     return res.json();
   }
 
-  // Stand-in when there is no backend yet. Uses the real prompts as labels.
-  function mockResult(prompts) {
-    return new Promise((resolve) => setTimeout(() => resolve({
-      mock: true,
-      results: prompts.slice(0, 3).map((p, i) => ({
-        label: p, score: 0.99 - i * 0.05,
-        box: [0.1 + i * 0.12, 0.15 + i * 0.1, 0.45 + i * 0.12, 0.6 + i * 0.1]
-      }))
-    }), 400));
+  // Meta Responses API, matching the proven Colab shape: one request per
+  // concept, image sent once as a data URL, boxes pulled from each reply.
+  async function postSamMeta(blob, prompts) {
+    if (!tokenInput.value) throw new Error("Paste your Meta API key into the Token field first.");
+    if (!imgEl) throw new Error("Pick a photo first.");
+    // Phone photos are huge and sometimes odd formats — normalize to a
+    // bounded JPEG so the API gets what it accepts. Boxes come back in
+    // these sent dimensions (recorded for rescaling).
+    const sent = prepareImage(imgEl, 1600);
+    const imageDataUrl = sent.dataUrl;
+    const headers = { "Content-Type": "application/json", "Authorization": "Bearer " + tokenInput.value };
+    const all = [];
+    let n = 0;
+    for (const concept of prompts) {
+      setStatus(`Asking SAM about "${concept}" (${++n}/${prompts.length})…`);
+      const body = {
+        model: modelInput.value.trim(),
+        stream: false,
+        input: [{
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: concept },
+            { type: "input_image", image_url: imageDataUrl }
+          ]
+        }]
+      };
+      let res;
+      try {
+        res = await fetch(endpointInput.value, {
+          method: "POST", headers, body: JSON.stringify(body)
+        });
+      } catch (e) {
+        throw new Error(`Network/CORS failure calling Meta directly (${e.message}). ` +
+          `Use "/api/sam" with server/proxy.mjs forwarding to ${endpointInput.value} instead.`);
+      }
+      if (!res.ok) throw new Error(`Meta HTTP ${res.status} on "${concept}": ${(await res.text()).slice(0, 300)}`);
+      const data = await res.json();
+      for (const b of extractBoxesFromMeta(data, concept)) all.push(b);
+    }
+    return { meta: true, results: all, sentW: sent.w, sentH: sent.h };
   }
 
-  // Accept common detection shapes and reduce to pixel-space xyxy.
+  // Draw the image into an offscreen canvas capped at maxDim on the long
+  // edge and export JPEG. Returns { dataUrl, w, h } of what was sent.
+  function prepareImage(img, maxDim) {
+    const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth * scale));
+    const h = Math.max(1, Math.round(img.naturalHeight * scale));
+    const c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    c.getContext("2d").drawImage(img, 0, 0, w, h);
+    return { dataUrl: c.toDataURL("image/jpeg", 0.85), w, h };
+  }
+
+  // Proven sam-3.1 reply shape: output items with type "message"
+  // carry content items with type "output_text", whose text holds tokens
+  // like <|box;x1=..;y1=..;x2=..;y2=..|><|mask;…;data=H,W,payload|>.
+  // Boxes are integer pixels in the original image. Mask payloads are
+  // kept for later decoding (see README) but not drawn.
+  function extractBoxesFromMeta(data, fallbackLabel) {
+    let text = "";
+    if (typeof data.output_text === "string") text += data.output_text;
+    for (const o of data.output || []) {
+      if (o.type && o.type !== "message") continue;
+      for (const c of o.content || []) {
+        if ((!c.type || c.type === "output_text") && typeof c.text === "string") text += c.text;
+      }
+    }
+    const out = [];
+    const REC = /<\|box;(.*?)\|><\|mask;(.*?)\|>/gs;
+    let m;
+    while ((m = REC.exec(text)) !== null) {
+      const b = kv(m[1]);
+      const box = [b.x1, b.y1, b.x2, b.y2].map(Number);
+      if (!box.every(Number.isFinite)) continue;
+      let maskH = null, maskW = null, maskPayload = null;
+      const at = m[2].indexOf("data=");
+      if (at >= 0) {
+        const parts = m[2].slice(at + 5).split(",");
+        if (parts.length >= 3) {
+          maskH = parseInt(parts[0], 10); maskW = parseInt(parts[1], 10);
+          maskPayload = parts.slice(2).join(",");
+        }
+      }
+      out.push({ label: fallbackLabel, box, format: "xyxy", maskH, maskW, maskPayload });
+    }
+    return out;
+  }
+
+  function kv(s) {
+    const o = {};
+    for (const p of String(s).split(";")) {
+      const i = p.indexOf("=");
+      if (i > 0) o[p.slice(0, i).trim()] = p.slice(i + 1).trim();
+    }
+    return o;
+  }
+
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(new Error("Could not read image."));
+      r.readAsDataURL(blob);
+    });
+  }
+
+   // Accept common detection shapes and reduce to pixel-space xyxy.
   // Supported items: {box|bbox|xyxy|xywh: [4 numbers], label, score},
   // {box: {xmin,ymin,xmax,ymax}} (HF style, 0..1 or 0..1000),
   // {boxes: [...], labels: [...], scores: [...]}, or a bare array.
@@ -146,7 +263,9 @@
       }
       out.push({ x1: clamp(Math.min(x1, x2), 0, W), y1: clamp(Math.min(y1, y2), 0, H),
                  x2: clamp(Math.max(x1, x2), 0, W), y2: clamp(Math.max(y1, y2), 0, H),
-                 label: labelOf(it, out.length), score: scoreOf(it) });
+                 label: labelOf(it, out.length), score: scoreOf(it),
+                 maskH: it.maskH ?? null, maskW: it.maskW ?? null,
+                 maskPayload: it.maskPayload ?? null });
     }
     return out;
   }
@@ -182,8 +301,10 @@
     if (!boxes.length) { boxList.innerHTML = '<li class="hint">No boxes.</li>'; return; }
     boxes.forEach((b) => {
       const li = document.createElement("li");
-      li.textContent = b.score == null ? b.label
-        : `${b.label} — ${(b.score * 100).toFixed(1)}% [${[b.x1, b.y1, b.x2, b.y2].map(v => Math.round(v)).join(", ")} px]`;
+      const coords = `[${[b.x1, b.y1, b.x2, b.y2].map(v => Math.round(v)).join(", ")} px]`;
+      const score = b.score == null ? "" : ` — ${(b.score * 100).toFixed(1)}%`;
+      const mask = b.maskPayload ? " +mask" : "";
+      li.textContent = `${b.label}${score} ${coords}${mask}`;
       boxList.appendChild(li);
     });
   }
@@ -194,6 +315,7 @@
       geometry: gps ? { type: "Point", coordinates: [gps.lon, gps.lat] } : null,
       properties: { label: b.label, score: b.score,
         boxPx: [b.x1, b.y1, b.x2, b.y2].map(Math.round),
+        maskH: b.maskH, maskW: b.maskW, maskPayload: b.maskPayload,
         photoGpsAccuracyM: gps ? gps.accuracyM : null,
         photoGpsAt: gps ? gps.at : null }
     })) };
