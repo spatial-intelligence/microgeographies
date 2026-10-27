@@ -38,6 +38,53 @@ in the GeoJSON export as `maskH`/`maskW`/`maskPayload`) for later
 decoding — e.g. with `meta_sam_parser.decode_mask_to_raster` as in the
 Colab prototype — but masks are not drawn on the page yet.
 
+## From photo to map pin (depth + heading + OSM)
+
+The collection pipeline turns each detection into an approximate map
+location for robot delivery-point microgeography:
+
+1. **Photo + location.** Take a photo in the page (live phone GPS) or
+   upload one later — the backend falls back to the JPEG's EXIF GPS
+   (`gps_source` in every reply is `live`, `exif`, or `none`).
+2. **Heading.** Capture the compass bearing (or type it) so each box
+   gets a true bearing via a pinhole camera model (`pixel_to_bearing`,
+   default 60° HFOV, adjustable).
+3. **Monocular depth.** `backend/depth.py` runs Depth Anything Small
+   (`LiheYoung/depth-anything-small-hf`, ~100 MB first download) to get
+   relative depth; the median over each box is mapped linearly to
+   metres (`relative_to_metric`, far end = `max_range`, default 30 m).
+   Single-image depth is scale-ambiguous, so treat pins as approximate.
+   Every reply also carries `depth_png`: the depth map colorized
+   turbo-style (blue far → red near, like Depth Anything V3 outdoor
+   visualizations), shown under Results.
+4. **Projection.** Bearing + range from the camera fix gives an approx
+   3D point per box: lat/lon (`destination_point` haversine) plus
+   `enu_m` metres east/north/up from the camera (level-camera
+   assumption) and the `pixel` box centre it came from — all listed
+   per detection and exported in the GeoJSON.
+5. **OSM snap.** `door`/`window`/`entrance`-like pins are snapped to the
+   nearest OpenStreetMap building outline via Overpass (`snapped` carries
+   `building_id` + `snap_m`); bins, steps, etc. keep the raw projection.
+
+Endpoints (all multipart, all degrade gracefully — a failed depth model
+or OSM lookup yields partial geo, never a 500):
+
+| endpoint       | input | output |
+|----------------|-------|--------|
+| `/api/detect`  | `image`, `concepts`, `lat`, `lon`, `heading`, `hfov`, `max_range`, `project` | boxes + `geo`/`snapped` per detection, `location`, `gps_source` |
+| `/api/project` | `image`, `boxes` (Meta SAM-3.1 xyxy JSON), same geo fields | projected detections (used by the page for Meta-direct boxes) |
+| `/api/depth`   | `image` | 80×60 relative-depth grid (0 = far, 1 = near) + `exif_gps` |
+
+Pure geometry/EXIF helpers have unit tests with no model or network:
+
+```sh
+.venv/bin/python backend/test_geo.py             # pure geometry/EXIF, no deps beyond Pillow
+.venv/bin/python backend/test_e2e_mock.py        # full HTTP loop, mock SAM + mock depth
+```
+
+Run the backend with `MOCK_SAM=1 MOCK_DEPTH=1` for offline development
+(deterministic boxes + gradient depth, no downloads).
+
 If the browser blocks the direct call (CORS), switch the endpoint to the
 relative `/api/sam` and run the proxy with your Meta key server-side:
 

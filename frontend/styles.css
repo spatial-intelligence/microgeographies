@@ -1,0 +1,12 @@
+body { font-family: system-ui, -apple-system, sans-serif; margin: 0; color: #222; }
+main { max-width: 720px; margin: 0 auto; padding: 16px; }
+section { margin: 12px 0; }
+label { display: block; font-weight: 600; margin-bottom: 4px; }
+input[type="text"] { width: 100%; padding: 8px; font-size: 16px; }
+button { padding: 10px 14px; font-size: 16px; }
+.row { display: flex; gap: 16px; flex-wrap: wrap; }
+#previewWrap { position: relative; max-width: 100%; }
+#preview { max-width: 100%; display: block; }
+#overlay { position: absolute; left: 0; top: 0; pointer-events: none; }
+#result { background: #f2f2f2; padding: 12px; white-space: pre-wrap; word-break: break-word; }
+#status { margin-left: 8px; }

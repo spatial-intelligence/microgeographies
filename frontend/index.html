@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#1a2a1a" />
+  <title>Microgeographies — SAM test</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main>
+    <h1>Microgeographies — detection test</h1>
+    <p>Upload a photo, enter object names, send to SAM 3. GPS is attached so photos can be mapped later.</p>
+
+    <section>
+      <label for="file">Photo</label>
+      <input id="file" type="file" accept="image/*" capture="environment" />
+    </section>
+
+    <section>
+      <label for="concepts">Objects (comma separated)</label>
+      <input id="concepts" type="text" value="door, steps" />
+    </section>
+
+    <section class="row">
+      <div>
+        <button id="gpsBtn" type="button">Get GPS location</button>
+        <p id="gpsOut">No location yet.</p>
+      </div>
+      <div>
+        <label for="apiBase">API base (blank = same origin)</label>
+        <input id="apiBase" type="text" placeholder="" />
+      </div>
+    </section>
+
+    <section>
+      <button id="sendBtn" type="button" disabled>Send to SAM</button>
+      <span id="status" role="status"></span>
+    </section>
+
+    <section>
+      <div id="previewWrap">
+        <img id="preview" alt="preview" hidden />
+        <canvas id="overlay"></canvas>
+      </div>
+      <pre id="result">No results yet.</pre>
+    </section>
+  </main>
+  <script src="app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    }
+  </script>
+</body>
+</html>

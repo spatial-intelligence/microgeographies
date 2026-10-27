@@ -33,9 +33,21 @@
     </section>
 
     <section class="card">
-      <h2>3. Location</h2>
+      <h2>3. Location &amp; heading</h2>
       <button type="button" id="gpsBtn">Get GPS location</button>
       <p id="gpsOut">No location yet.</p>
+      <button type="button" id="headingBtn">Capture compass heading</button>
+      <p id="headingOut">No heading yet — point the phone at the subject first.</p>
+      <label>Heading, degrees (0 = north, overrides capture)
+        <input type="number" id="headingInput" min="0" max="360" step="0.1" placeholder="e.g. 123.4">
+      </label>
+      <label>Horizontal field of view, degrees
+        <input type="number" id="hfovInput" value="60" min="10" max="120" step="1">
+      </label>
+      <label>Max depth range, metres (monocular scale far end)
+        <input type="number" id="rangeInput" value="30" min="5" max="200" step="1">
+      </label>
+      <p class="hint">No GPS? The backend falls back to the photo's EXIF location when you upload a saved photo. Each box is projected to an approx map pin using heading + monocular depth; door/window pins snap to the OpenStreetMap building outline.</p>
     </section>
 
     <section class="card">
@@ -56,6 +68,9 @@
     <section class="card">
       <h2>5. Results</h2>
       <ul id="boxList"><li class="hint">No results yet.</li></ul>
+      <h3>Depth (blue far, red near)</h3>
+      <img id="depthImg" alt="Colorized monocular depth map" hidden>
+      <p class="hint" id="depthNote">No depth map yet — it arrives with the next Send.</p>
       <details>
         <summary>Raw JSON</summary>
         <pre id="rawOut">{}</pre>

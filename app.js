@@ -5,14 +5,71 @@
 
   const fileInput = $("fileInput"), promptsInput = $("promptsInput"),
     gpsBtn = $("gpsBtn"), gpsOut = $("gpsOut"),
+    headingBtn = $("headingBtn"), headingOut = $("headingOut"),
+    headingInput = $("headingInput"), hfovInput = $("hfovInput"),
+    rangeInput = $("rangeInput"),
     endpointInput = $("endpointInput"), modelInput = $("modelInput"),
     tokenInput = $("tokenInput"),
     sendBtn = $("sendBtn"), statusOut = $("statusOut"),
     canvas = $("photoCanvas"), boxList = $("boxList"),
+    depthImg = $("depthImg"), depthNote = $("depthNote"),
     rawOut = $("rawOut"), exportBtn = $("exportBtn"), pngBtn = $("pngBtn");
 
   let imgEl = null, fileBlob = null, boxes = [], gps = null, lastRaw = {};
   let sentSize = null; // pixel size of the image SAM actually saw
+  let headingDeg = null; // compass bearing of the camera axis
+
+  headingBtn.addEventListener("click", () => {
+    if (!("DeviceOrientationEvent" in window)) {
+      headingOut.textContent = "Compass not available — type the heading manually.";
+      return;
+    }
+    const start = () => {
+      headingOut.textContent = "Reading compass — hold the phone steady, pointing at the subject…";
+      const handler = (e) => {
+        let h = null, approx = false;
+        if (e.webkitCompassHeading != null && e.webkitCompassHeading !== 0) {
+          h = e.webkitCompassHeading; // iOS, true north
+        } else if (e.alpha != null) {
+          h = (360 - e.alpha) % 360; // Android; true north only when absolute
+          approx = e.absolute !== true;
+        }
+        if (h == null || Number.isNaN(h)) return;
+        window.removeEventListener("deviceorientationabsolute", handler);
+        window.removeEventListener("deviceorientation", handler);
+        headingDeg = Math.round(h * 10) / 10;
+        headingInput.value = headingDeg;
+        headingOut.textContent = `Heading ${headingDeg}°${approx ? " (relative — may not be true north)" : ""}.`;
+      };
+      window.addEventListener("deviceorientationabsolute", handler);
+      window.addEventListener("deviceorientation", handler);
+      setTimeout(() => {
+        window.removeEventListener("deviceorientationabsolute", handler);
+        window.removeEventListener("deviceorientation", handler);
+        if (headingDeg == null) headingOut.textContent = "No compass reading — type the heading manually.";
+      }, 8000);
+    };
+    // iOS needs an explicit permission gesture.
+    if (typeof DeviceOrientationEvent.requestPermission === "function") {
+      DeviceOrientationEvent.requestPermission().then((r) => {
+        if (r === "granted") start();
+        else headingOut.textContent = "Compass permission denied — type the heading manually.";
+      }).catch(() => { headingOut.textContent = "Compass failed — type the heading manually."; });
+    } else {
+      start();
+    }
+  });
+  headingInput.addEventListener("change", () => {
+    const v = parseFloat(headingInput.value);
+    headingDeg = Number.isFinite(v) ? ((v % 360) + 360) % 360 : null;
+    if (headingDeg != null) headingOut.textContent = `Heading ${headingDeg}° (manual).`;
+  });
+
+  function currentHeading() {
+    const v = parseFloat(headingInput.value);
+    if (Number.isFinite(v)) return ((v % 360) + 360) % 360;
+    return headingDeg;
+  }
 
   // Secure-context note (geolocation needs HTTPS, localhost counts as secure).
   $("secureNote").textContent = window.isSecureContext
@@ -80,6 +137,11 @@
       sentSize = (data.meta && data.sentW)
         ? { w: data.sentW, h: data.sentH }
         : { w: canvas.width, h: canvas.height };
+      // Meta-direct boxes carry no geo: run them through the Python
+      // backend projector (depth + heading + OSM snap) when possible.
+      let extra = "";
+      if (data.meta) extra = await projectMetaBoxes(data);
+      else { extra = gpsNote(data.gps_source); showDepth(data.depth_png); }
       draw(); renderList();
       exportBtn.disabled = boxes.length === 0;
       pngBtn.disabled = boxes.length === 0;
@@ -88,6 +150,7 @@
       } else {
         setStatus(`Done — ${boxes.length} box(es).`);
       }
+      if (extra) setStatus(statusOut.textContent + extra);
     } catch (e) {
       setStatus(`Error: ${e.message}`, true);
     }
@@ -102,11 +165,62 @@
     fd.append("image", blob);
     fd.append("prompts", JSON.stringify(prompts));
     if (gps) { fd.append("lat", String(gps.lat)); fd.append("lon", String(gps.lon)); }
+    const hdg = currentHeading();
+    if (hdg != null) fd.append("heading", String(hdg));
+    fd.append("hfov", hfovInput.value || "60");
+    fd.append("max_range", rangeInput.value || "30");
     const headers = {};
     if (tokenInput.value) headers["Authorization"] = "Bearer " + tokenInput.value;
     const res = await fetch(endpointInput.value, { method: "POST", headers, body: fd });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
     return res.json();
+  }
+
+  function gpsNote(src) {
+    if (src === "exif") return " Location came from the photo EXIF.";
+    if (src === "none") return " No location — projection skipped.";
+    return "";
+  }
+
+  // Project Meta-direct boxes to approx map pins via the Python backend
+  // (/api/project on the same origin). Boxes are rescaled to the
+  // uploaded original's pixels first; results merge back by index.
+  // Absence of a backend (static hosting) is not an error — boxes stay.
+  // Returns a status suffix ("" when nothing to report).
+  async function projectMetaBoxes(data) {
+    const hdg = currentHeading();
+    if (hdg == null) return " No heading — projection skipped.";
+    if (!imgEl || !data.sentW) return "";
+    const k = imgEl.naturalWidth / canvas.width; // canvas px -> uploaded-original px
+    const payload = boxes.map((b) => ({
+      label: b.label,
+      box: [b.x1 * k, b.y1 * k, b.x2 * k, b.y2 * k].map(Math.round),
+      score: b.score,
+    }));
+    const fd = new FormData();
+    fd.append("image", fileBlob);
+    fd.append("boxes", JSON.stringify(payload));
+    if (gps) { fd.append("lat", String(gps.lat)); fd.append("lon", String(gps.lon)); }
+    fd.append("heading", String(hdg));
+    fd.append("hfov", hfovInput.value || "60");
+    fd.append("max_range", rangeInput.value || "30");
+    let res;
+    try {
+      res = await fetch("/api/project", { method: "POST", body: fd });
+    } catch (e) {
+      return " Projection backend unreachable — boxes only.";
+    }
+    if (!res.ok) return " Projection failed — boxes only.";
+    const proj = await res.json();
+    showDepth(proj.depth_png);
+    (proj.detections || []).forEach((d, i) => {
+      if (!boxes[i]) return;
+      if (d.geo) boxes[i].geo = d.geo;
+      if (d.snapped) boxes[i].snapped = d.snapped;
+      if (d.geo_error) boxes[i].geo_error = d.geo_error;
+    });
+    const n = (proj.detections || []).filter((d) => d.geo).length;
+    return gpsNote(proj.gps_source) + (n ? ` ${n} pin(s) projected.` : "");
   }
 
   // Meta Responses API, matching the proven Colab shape: one request per
@@ -275,7 +389,9 @@
                  x2: clamp(Math.max(x1, x2), 0, W), y2: clamp(Math.max(y1, y2), 0, H),
                  label: labelOf(it, out.length), score: scoreOf(it),
                  maskH: it.maskH ?? null, maskW: it.maskW ?? null,
-                 maskPayload: it.maskPayload ?? null });
+                 maskPayload: it.maskPayload ?? null,
+                 geo: it.geo ?? null, snapped: it.snapped ?? null,
+                 geo_error: it.geo_error ?? null });
     }
     return out;
   }
@@ -337,6 +453,19 @@
     }, "image/png");
   });
 
+  // Preferred map pin for a box: OSM-snapped outline point, else the
+  // depth-projected point, else the camera location, else nothing.
+  function pinOf(b) {
+    if (b.snapped) return { lon: b.snapped.lon, lat: b.snapped.lat, kind: "snapped" };
+    if (b.geo) return { lon: b.geo.lon, lat: b.geo.lat, kind: "projected" };
+    if (gps) return { lon: gps.lon, lat: gps.lat, kind: "camera" };
+    return null;
+  }
+
+  function osmUrl(lat, lon) {
+    return `https://www.openstreetmap.org/?mlat=${lat.toFixed(6)}&mlon=${lon.toFixed(6)}#map=19/${lat.toFixed(6)}/${lon.toFixed(6)}`;
+  }
+
   function renderList() {
     boxList.innerHTML = "";
     if (!boxes.length) { boxList.innerHTML = '<li class="hint">No boxes.</li>'; return; }
@@ -346,20 +475,56 @@
       const score = b.score == null ? "" : ` — ${(b.score * 100).toFixed(1)}%`;
       const mask = b.maskPayload ? " +mask" : "";
       li.textContent = `${b.label}${score} ${coords}${mask}`;
+      if (b.geo) {
+        const pin = pinOf(b);
+        const span = document.createElement("span");
+        const px = b.geo.pixel ? `pixel (${b.geo.pixel.x}, ${b.geo.pixel.y})` : "pixel ?";
+        const enu = b.geo.enu_m
+          ? `x ${b.geo.enu_m.x} m E, y ${b.geo.enu_m.y} m N, z ${b.geo.enu_m.z} m up`
+          : "x/y/z ?";
+        span.textContent = ` approx ${b.geo.lat.toFixed(6)}, ${b.geo.lon.toFixed(6)}` +
+          ` (${b.geo.distance_m.toFixed(1)} m @ ${b.geo.bearing_deg.toFixed(1)}°)` +
+          (b.snapped ? " — on building outline" : "");
+        li.appendChild(document.createElement("br"));
+        li.appendChild(span);
+        const sub = document.createElement("span");
+        sub.textContent = ` ${px} → ${enu} (from camera)`;
+        li.appendChild(document.createElement("br"));
+        li.appendChild(sub);
+        const a = document.createElement("a");
+        a.href = osmUrl(pin.lat, pin.lon);
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.textContent = pin.kind === "snapped" ? "OpenStreetMap pin (snapped)" : "OpenStreetMap pin";
+        li.appendChild(document.createTextNode(" "));
+        li.appendChild(a);
+      } else if (b.geo_error) {
+        const span = document.createElement("span");
+        span.textContent = ` no pin: ${b.geo_error}`;
+        li.appendChild(document.createElement("br"));
+        li.appendChild(span);
+      }
       boxList.appendChild(li);
     });
   }
 
   exportBtn.addEventListener("click", () => {
-    const gj = { type: "FeatureCollection", features: boxes.map((b) => ({
-      type: "Feature",
-      geometry: gps ? { type: "Point", coordinates: [gps.lon, gps.lat] } : null,
-      properties: { label: b.label, score: b.score,
-        boxPx: [b.x1, b.y1, b.x2, b.y2].map(Math.round),
-        maskH: b.maskH, maskW: b.maskW, maskPayload: b.maskPayload,
-        photoGpsAccuracyM: gps ? gps.accuracyM : null,
-        photoGpsAt: gps ? gps.at : null }
-    })) };
+    const hdg = currentHeading();
+    const gj = { type: "FeatureCollection", features: boxes.map((b) => {
+      const pin = pinOf(b);
+      return {
+        type: "Feature",
+        geometry: pin ? { type: "Point", coordinates: [pin.lon, pin.lat] } : null,
+        properties: { label: b.label, score: b.score,
+          pinKind: pin ? pin.kind : null, // snapped | projected | camera
+          geo: b.geo ?? null, snapped: b.snapped ?? null,
+          cameraHeadingDeg: hdg,
+          boxPx: [b.x1, b.y1, b.x2, b.y2].map(Math.round),
+          maskH: b.maskH, maskW: b.maskW, maskPayload: b.maskPayload,
+          photoGpsAccuracyM: gps ? gps.accuracyM : null,
+          photoGpsAt: gps ? gps.at : null }
+      };
+    }) };
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([JSON.stringify(gj, null, 2)], { type: "application/geo+json" }));
     a.download = "microgeographies-results.geojson";
@@ -370,6 +535,13 @@
   function setStatus(msg, isErr) {
     statusOut.textContent = msg;
     statusOut.style.color = isErr ? "#b00020" : "";
+  }
+
+  function showDepth(dataUrl) {
+    if (!dataUrl) return;
+    depthImg.src = dataUrl;
+    depthImg.hidden = false;
+    depthNote.textContent = "Monocular depth — blue far, red near. Warm areas are closer to the camera.";
   }
 
   if ("serviceWorker" in navigator) {
