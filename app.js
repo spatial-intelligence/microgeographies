@@ -183,25 +183,32 @@
       const data = await postSam(fileBlob, prompts);
       lastRaw = data;
       rawOut.textContent = JSON.stringify(data, null, 2);
-      // Meta returns pixels in the sent image, but the canvas may differ
-      // in size — normalize at sent size, then scale to the canvas.
+      // Meta and browser-local SAM return pixels in the sent image, but
+      // the canvas may differ in size — normalize at sent size, then
+      // scale to the canvas.
+      const direct = data.meta || data.browser;
       let NW = canvas.width, NH = canvas.height, rescale = 1;
-      if (data.meta && data.sentW) {
+      if (direct && data.sentW) {
         NW = data.sentW; NH = data.sentH;
+        rescale = canvas.width / NW;
+      } else if (imgEl) {
+        // Backend boxes are full-upload pixels: normalize there, then
+        // scale down to the canvas.
+        NW = imgEl.naturalWidth; NH = imgEl.naturalHeight;
         rescale = canvas.width / NW;
       }
       boxes = normalizeBoxes(data, NW, NH);
       if (rescale !== 1) boxes.forEach((b) => {
         b.x1 *= rescale; b.x2 *= rescale; b.y1 *= rescale; b.y2 *= rescale;
       });
-      sentSize = (data.meta && data.sentW)
+      sentSize = (direct && data.sentW)
         ? { w: data.sentW, h: data.sentH }
         : { w: canvas.width, h: canvas.height };
       draw(); renderList(); // SAM boxes on screen immediately
-      // Meta-direct boxes carry no geo: run them through the Python
-      // backend projector (depth + heading + OSM snap) when possible.
+      // Direct boxes carry no geo: run them through the Python backend
+      // projector (depth + heading + OSM snap) when possible.
       let extra = "";
-      if (data.meta) {
+      if (direct) {
         setStatus(`SAM finished — ${boxes.length} box(es). Starting depth processing…`);
         extra = await projectMetaBoxes(data);
       }
@@ -214,7 +221,7 @@
       exportBtn.disabled = boxes.length === 0;
       pngBtn.disabled = boxes.length === 0;
       reprojectBtn.disabled = origBoxes.length === 0;
-      if (data.meta && data.results.length > boxes.length) {
+      if (direct && data.results.length > boxes.length) {
         setStatus(`Done — ${boxes.length} box(es) drawn (${data.results.length - boxes.length} dropped as invalid).`);
       } else {
         setStatus(`Done — ${boxes.length} box(es).`);
@@ -228,7 +235,14 @@
 
   function isMetaEndpoint(url) { return /api\.meta\.ai/i.test(url); }
 
+  function samBackend() {
+    const el = document.querySelector('input[name="samBackend"]:checked');
+    return el ? el.value : "api";
+  }
+
   async function postSam(blob, prompts) {
+    if (samBackend() === "browser") return postSamLocal(blob, prompts);
+    if (samBackend() === "clip") return postSamClip(blob, prompts);
     if (isMetaEndpoint(endpointInput.value)) return postSamMeta(blob, prompts);
     // Generic detector-style backend: multipart image + JSON prompts.
     const fd = new FormData();
@@ -304,6 +318,68 @@
       return ` Heading ${proj.heading_deg}° from photo EXIF.`;
     }
     return "";
+  }
+
+  // Local CLIP windows: the backend scores sliding windows against the
+  // prompts — offline after a one-time ~350 MB download, coarse boxes.
+  // Reply shape matches /api/detect, so the normal path below just works.
+  async function postSamClip(blob, prompts) {
+    setStatus("Scoring windows with local CLIP (first run downloads weights)…");
+    const fd = new FormData();
+    fd.append("image", blob);
+    fd.append("concepts", JSON.stringify(prompts));
+    locationFields(fd);
+    const hdg = currentHeading();
+    if (hdg != null) fd.append("heading", String(hdg));
+    fd.append("hfov", hfovInput.value || "60");
+    fd.append("max_range", rangeInput.value || "30");
+    fd.append("detector", "clip");
+    const res = await fetch("/api/detect", { method: "POST", body: fd });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    return res.json();
+  }
+
+  // In-browser SAM3 INT8: image encoded once, text concepts run through
+  // the local decoder. Boxes come back in sent-image pixels, like Meta.
+  async function postSamLocal(blob, prompts) {
+    if (!window.MG_SAM3) throw new Error("sam3local.js failed to load.");
+    if (!navigator.gpu) {
+      setStatus("No WebGPU — WASM fallback will be very slow (minutes). Continuing anyway…");
+    }
+    setStatus("Loading browser SAM (one-time ~930 MB download, then offline)…");
+    const r = await window.MG_SAM3.ensureSessions((label, frac) => {
+      setStatus(`Fetching SAM ${label}… ${Math.round(frac * 100)}%`);
+    });
+    if (r.wasmFallback) setStatus("WebGPU refused the quantized ops — WASM fallback, expect minutes.");
+    const sent = prepareImage(imgEl, 1008);
+    const full = document.createElement("canvas");
+    full.width = 1008; full.height = 1008;
+    const fctx = full.getContext("2d");
+    const tmp = new Image();
+    await new Promise((resolve, reject) => {
+      tmp.onload = resolve;
+      tmp.onerror = () => reject(new Error("Could not decode image."));
+      tmp.src = sent.dataUrl;
+    });
+    fctx.drawImage(tmp, 0, 0, 1008, 1008);
+    const px = fctx.getImageData(0, 0, 1008, 1008).data;
+    const chw = new Uint8Array(3 * 1008 * 1008);
+    const plane = 1008 * 1008;
+    for (let i = 0, j = 0; i < px.length; i += 4, j++) {
+      chw[j] = px[i]; chw[plane + j] = px[i + 1]; chw[2 * plane + j] = px[i + 2];
+    }
+    setStatus("Encoding image in browser…");
+    const feats = await window.MG_SAM3.encodeImage(chw);
+    const all = [];
+    let n = 0;
+    for (const concept of prompts) {
+      setStatus(`Finding "${concept}" in browser (${++n}/${prompts.length})…`);
+      for (const b of await window.MG_SAM3.detect(feats, concept, sent.w, sent.h)) all.push(b);
+    }
+    if (window.MG_SAM3.wasFallback()) {
+      setStatus("WebGPU refused a quantized op mid-run — finished on WASM instead (slow).");
+    }
+    return { browser: true, results: all, sentW: sent.w, sentH: sent.h };
   }
 
   // Meta Responses API, matching the proven Colab shape: one request per

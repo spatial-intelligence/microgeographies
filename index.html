@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>MicroGeo Capture Tool v0.3</title>
+  <title>MicroGeo Capture Tool v0.5</title>
   <meta name="description" content="Test page: upload a photo, send it to SAM 3.1 with object prompts, get bounding boxes back with GPS.">
   <meta name="theme-color" content="#1a2b1f">
   <link rel="manifest" href="manifest.webmanifest">
@@ -14,7 +14,7 @@
 </head>
 <body>
   <header>
-    <h1>MicroGeo Capture Tool <span class="ver">v0.3</span></h1>
+    <h1>MicroGeo Capture Tool <span class="ver">v0.5</span></h1>
     <p class="tagline">Collect delivery-point microgeography: photo → depth → map pin.</p>
     <p id="secureNote"></p>
   </header>
@@ -61,8 +61,12 @@
     </section>
 
     <section class="card">
-      <h2>4. SAM API</h2>
-      <label>Endpoint
+      <h2>4. SAM detector</h2>
+      <label class="row"><input type="radio" name="samBackend" value="api" checked> API SAM 3.1 (needs internet + token below)</label>
+      <label class="row"><input type="radio" name="samBackend" value="browser"> Browser SAM3-INT8 (~930 MB once, then fully offline; WebGPU recommended)</label>
+      <label class="row"><input type="radio" name="samBackend" value="clip"> Local CLIP windows (~350 MB once, then offline; coarse boxes, no token needed)</label>
+      <p class="hint">Browser and CLIP modes still use the local backend for depth + map pins (localhost works offline).</p>
+      <label>Endpoint (API mode)
         <input type="text" id="endpointInput" autocomplete="off" spellcheck="false">
       </label>
       <label>Model
@@ -115,6 +119,7 @@
 
   <script src="config.js"></script>
   <script src="exif.js"></script>
+  <script src="sam3local.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="app.js"></script>
 </body>

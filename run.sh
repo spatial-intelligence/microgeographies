@@ -26,6 +26,7 @@ fi
 
 # Depth weights live here permanently (outside the repo, inside your home).
 # First run downloads ~95 MB once; every later start reuses it from disk.
+# (CLIP weights ~350 MB land in the same cache on first Local-CLIP use.)
 export HF_HOME="${HF_HOME:-$HOME/.cache/microgeographies}"
 export HF_HUB_CACHE="$HF_HOME/hub"
 .venv/bin/python backend/preload_depth.py || exit 1

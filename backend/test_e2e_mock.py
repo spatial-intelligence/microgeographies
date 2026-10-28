@@ -5,6 +5,7 @@ import sys
 sys.path.insert(0, "backend")
 os.environ["MOCK_SAM"] = "1"
 os.environ["MOCK_DEPTH"] = "1"
+os.environ["MOCK_CLIP"] = "1"  # routing only; real CLIP proven separately
 
 from PIL import Image  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -153,5 +154,17 @@ j9 = r9.json()
 assert j9["gps_source"] == "manual", j9
 assert (j9["location"]["lat"], j9["location"]["lon"]) == (52.0, 1.0), j9
 print("manual prefer OK:", j9["gps_source"], j9["location"])
+
+# 10. detector=clip routes to the CLIP scorer with geo attached
+r10 = c.post("/api/detect",
+             files={"image": ("t.jpg", data, "image/jpeg")},
+             data={"concepts": '["door"]', "lat": "51.5", "lon": "-0.125",
+                   "heading": "90", "detector": "clip"})
+j10 = r10.json()
+assert j10["detector"] == "clip", j10
+assert len(j10["detections"]) > 0, j10
+assert all("geo" in d and d.get("clip") for d in j10["detections"]), j10
+print("clip detector OK:", len(j10["detections"]), "boxes, e.g.",
+      j10["detections"][0]["box"], j10["detections"][0]["score"])
 
 print("ALL E2E OK")

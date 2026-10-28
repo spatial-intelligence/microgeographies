@@ -95,6 +95,7 @@ async def detect(
     project: str = Form(default="1"),
     model: str = Form(default=""),
     prefer: str = Form(default=""),
+    detector: str = Form(default="sam"),
 ):
     raw = await image.read()
     pil = Image.open(io.BytesIO(raw)).convert("RGB")
@@ -112,7 +113,7 @@ async def detect(
     location, gps_source = geo.resolve_location(lat, lon, pil, prefer=prefer or "exif")
     heading_deg, heading_source = geo.resolve_heading(heading, pil)
 
-    dets = run_detections(pil, names)
+    dets = run_detections(pil, names, detector=detector or "sam")
     depth_png = None
     if project == "1":
         grid, depth_error = get_depth(pil, model_id=model or None)
@@ -130,12 +131,18 @@ async def detect(
         "heading_deg": heading_deg,  # resolved manual > EXIF > None
         "heading_source": heading_source,  # "manual" | "exif" | "none"
         "depth_png": depth_png,  # turbo-colorized depth map (blue far → red near)
+        "detector": detector or "sam",
     }
 
 
-def run_detections(pil, names):
-    """SAM boxes (mock or real) for one image; shared by detect + batch."""
+def run_detections(pil, names, detector="sam"):
+    """Boxes for one image: SAM (mock or real) or offline CLIP windows."""
     w, h = pil.size
+    if detector == "clip":
+        if os.getenv("MOCK_CLIP") == "1":
+            return [{**d, "clip": True} for d in mock_detections(w, h, names)]
+        import clip_detect as cd
+        return cd.detect_clip(pil, names)
     if os.getenv("MOCK_SAM") == "1":
         return mock_detections(w, h, names)
     import torch
@@ -305,6 +312,7 @@ async def batch(
     max_range: str = Form(default="30"),
     model: str = Form(default=""),
     prefer: str = Form(default=""),
+    detector: str = Form(default="sam"),
     merge_radius_m: str = Form(default="8"),
     sim_min: str = Form(default="0.75"),
 ):
@@ -360,7 +368,7 @@ async def batch(
         w, h = pil.size
         location, gps_source = geo.resolve_location(lat, lon, pil, prefer=prefer or "exif")
         hdg, hdg_source = geo.resolve_heading(heading, pil)
-        dets = mg.dedupe_same_image(run_detections(pil, names))
+        dets = mg.dedupe_same_image(run_detections(pil, names, detector=detector or "sam"))
         grid, depth_error = get_depth(pil, model_id=model or None)
         dets = project_boxes(pil, dets, location,
                              "" if hdg is None else str(hdg),
@@ -387,6 +395,7 @@ async def batch(
         "images": images,
         "skipped": max(0, len(members) - MAX_BATCH_IMAGES),
         "merged": mg.merged_feature_collection(clusters),
+        "detector": detector or "sam",
     }
 
 

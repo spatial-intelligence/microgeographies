@@ -87,9 +87,44 @@ Pure geometry/EXIF helpers have unit tests with no model or network:
 ```sh
 .venv/bin/python backend/test_geo.py             # pure geometry/EXIF, no deps beyond Pillow
 .venv/bin/python backend/test_merge.py           # IoU dedupe, crop similarity, clustering
+.venv/bin/python backend/test_clip.py            # proposals, CLIP pick top-k/NMS (injected scorer)
 .venv/bin/python backend/test_e2e_mock.py        # full HTTP loop, mock SAM + mock depth
 .venv/bin/python backend/test_osm_snap_stub.py   # OSM snap wiring via a local stub
 ```
+
+## Offline browser SAM (INT8, no internet after setup)
+
+Section 4 offers two detectors: API SAM 3.1, or Browser SAM3-INT8
+(`rusen/sam3-browser-int8`: dynamic-INT8-quantized SAM3 splits run
+under ONNX Runtime Web — 466 MB image encoder, 387 MB language
+encoder, 35 MB decoder). The weights download once (~930 MB with
+progress) into Cache Storage and are pinned there across service-worker
+updates; the ONNX runtime itself is cached the same way. After that the
+detector runs fully offline — depth + map pins still come from the
+local backend, which is also offline-capable.
+
+Practical notes: WebGPU is strongly recommended (the quantized ops take
+~6–18 s there versus minutes on WASM, which the page falls back to
+automatically with a warning — including a mid-run retry if WebGPU
+rejects a quantized op such as GatherND on int64). The tokenizer port
+in `sam3local.js` is byte-identical to the Python reference on the
+checked words; the model math itself was validated end to end with
+onnxruntime CPU (a "door" prompt on the test facade returned
+`[510.8, 421.6, 689.8, 698.8]` at 0.772 against a
+`[520, 430, 680, 700]` ground truth).
+
+## Offline CLIP detector (third option, coarse boxes)
+
+Section 4 also offers Local CLIP windows: `backend/clip_detect.py`
+scores multi-scale sliding windows against each prompt with
+`openai/clip-vit-base-patch32` (~350 MB once, then offline) and keeps
+the best after threshold (0.22), top-5 per concept, and NMS. Select it
+and the page posts to same-origin `/api/detect` with `detector=clip`
+(any detector also works on `/api/batch`). Boxes are window-aligned and
+coarse — on the test facade "door" scored `[300, 338, 900, 788]` at
+0.287, containing the true door — but every kept box earned its score
+against the pixels, and downstream depth, pins, map, and merging work
+unchanged.
 
 ## Batch + merged map
 

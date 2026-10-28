@@ -1,5 +1,11 @@
-const CACHE = "microgeo-v10"; // bump whenever the shell changes, or updates never reach installed users
-const SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./exif.js", "./config.js", "./manifest.webmanifest", "./icon.svg"];
+const CACHE = "microgeo-v13"; // bump whenever the shell changes, or updates never reach installed users
+const SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./exif.js", "./sam3local.js", "./config.js", "./manifest.webmanifest", "./icon.svg"];
+// Pinned separately: the ONNX Runtime Web files (small) live here after
+// first use; the 700 MB SAM weights live in "microgeo-sam3", written by
+// the page itself. Neither is ever precached or wiped with the shell.
+const VENDOR_CACHE = "microgeo-vendor";
+const MODEL_CACHE = "microgeo-sam3";
+const ORT_CDN = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -8,18 +14,23 @@ self.addEventListener("install", (e) => {
 self.addEventListener("activate", (e) => {
   e.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE && k !== VENDOR_CACHE && k !== MODEL_CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
 
-self.addEventListener("fetch", (e) => {
-  if (e.request.method !== "GET" || !e.request.url.startsWith(self.location.origin)) return;
+function cacheFirst(e, cacheName) {
   e.respondWith(
-    caches.match(e.request).then((hit) => hit || fetch(e.request).then((res) => {
-      const copy = res.clone();
-      caches.open(CACHE).then((c) => c.put(e.request, copy));
+    caches.open(cacheName).then((c) => c.match(e.request).then((hit) => hit || fetch(e.request).then((res) => {
+      if (res.ok) c.put(e.request, res.clone());
       return res;
-    }))
+    })))
   );
+}
+
+self.addEventListener("fetch", (e) => {
+  if (e.request.method !== "GET") return;
+  if (e.request.url.startsWith(ORT_CDN)) { cacheFirst(e, VENDOR_CACHE); return; }
+  if (!e.request.url.startsWith(self.location.origin)) return;
+  cacheFirst(e, CACHE);
 });
