@@ -399,6 +399,121 @@ async def batch(
     }
 
 
+@app.post("/api/sfm")
+async def sfm(
+    zipfile: UploadFile = File(...),
+    detections: str = Form(default=""),
+    use_gpu: str = Form(default="1"),
+):
+    """Reconstruct a zip of photos with COLMAP and label the 3D points.
+
+    Multipart fields: `zipfile` (zip archive of photos), `detections`
+    (optional JSON mapping image filename to
+    [{label, box: [x1,y1,x2,y2], score}] in ORIGINAL pixels, same
+    convention as /api/project), `use_gpu` ("1" default: use CUDA only
+    when actually available; "0" forces CPU).
+
+    GPU choice is automatic: CUDA is used only when torch.cuda or
+    nvidia-smi reports a real GPU, otherwise CPU flags are passed —
+    `use_gpu` is an override to force CPU. Returns 503 (never 500) when
+    neither the COLMAP binary nor pycolmap is installed.
+    """
+    import tempfile
+    import zipfile as _zip
+
+    from fastapi.responses import JSONResponse
+    import sfm as sfm_mod
+
+    try:
+        raw = await zipfile.read()
+    except Exception as e:
+        return {"error": f"could not read zip: {e}", "cameras": []}
+    try:
+        zf = _zip.ZipFile(io.BytesIO(raw))
+    except _zip.BadZipFile:
+        return {"error": "not a zip file", "cameras": []}
+    members = [i for i in zf.infolist()
+               if not i.is_dir() and i.filename.lower().endswith(IMAGE_EXTS)]
+    members.sort(key=lambda i: i.filename)
+    if not members:
+        return {"error": "no images in zip", "cameras": []}
+    if sum(i.file_size for i in members) > MAX_BATCH_BYTES:
+        return {"error": "zip contents exceed 200 MB", "cameras": []}
+
+    want_gpu = str(use_gpu or "1").strip().lower() not in (
+        "0", "false", "no", "off")
+    gpu_used = bool(want_gpu and sfm_mod.gpu_available())
+    warnings = []
+    if want_gpu and not gpu_used:
+        warnings.append("no GPU detected: COLMAP runs on CPU")
+
+    if not sfm_mod.sfm_backend_available():
+        return JSONResponse(status_code=503, content={
+            "error": "colmap not installed: install the COLMAP CLI "
+                     "(https://colmap.github.io) or `pip install pycolmap` "
+                     "to enable /api/sfm",
+            "cameras": [], "gpu_used": gpu_used, "warnings": warnings})
+
+    try:
+        dets = json.loads(detections) if (detections or "").strip() else {}
+    except json.JSONDecodeError:
+        dets = {}
+        warnings.append("detections is not valid JSON: label voting skipped")
+    if dets and not isinstance(dets, dict):
+        dets = {}
+        warnings.append("detections must map image filename to boxes: "
+                        "label voting skipped")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="sfm-") as tmp:
+            img_dir = os.path.join(tmp, "images")
+            os.makedirs(img_dir, exist_ok=True)
+            for info in members[:MAX_BATCH_IMAGES]:
+                try:
+                    data = zf.read(info.filename)
+                    pil = Image.open(io.BytesIO(data)).convert("RGB")
+                except Exception:
+                    continue
+                pil.save(os.path.join(img_dir,
+                                      os.path.basename(info.filename)))
+            names = sorted(os.listdir(img_dir))
+            if len(names) < 2:
+                return {"error": "need at least 2 readable images "
+                                 "for reconstruction",
+                        "cameras": [], "gpu_used": gpu_used,
+                        "warnings": warnings}
+            model_dir, run_warnings = sfm_mod.reconstruct(
+                img_dir, os.path.join(tmp, "workspace"), gpu_used)
+            warnings.extend(run_warnings)
+            cameras, points, colors, parse_warnings = sfm_mod.parse_model(
+                model_dir)
+            warnings.extend(parse_warnings)
+            total = len(points)
+            points, colors = sfm_mod.downsample(points, colors)
+            if total > len(points):
+                warnings.append(f"downsampled {total} points "
+                                f"to {len(points)} for the PLY export")
+            ply_text = sfm_mod.write_ply_ascii(points, colors)
+            point_labels = {str(k): v for k, v in
+                            sfm_mod.vote_point_labels(
+                                points, cameras, dets).items()}
+            registered = {c["image"] for c in cameras}
+            return {
+                "ply": ply_text,
+                "point_count": len(points),
+                "total_points": total,
+                "cameras": cameras,
+                "point_labels": point_labels,
+                "registered": sorted(registered),
+                "unregistered": [n for n in names if n not in registered],
+                "gpu_used": gpu_used,
+                "warnings": warnings,
+            }
+    except Exception as e:  # reconstruction failure is data, never a 500
+        return {"error": f"sfm failed: {e}", "cameras": [],
+                "gpu_used": gpu_used, "warnings": warnings}
+
+
 # Single-origin serving: the page and the API share one host:port so the
 # browser's Meta-direct path can reach /api/project without CORS or
 # cross-port failures (which previously broke depth + pins silently).

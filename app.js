@@ -177,16 +177,17 @@
   sendBtn.addEventListener("click", async () => {
     if (!fileBlob) { setStatus("Pick a photo first.", true); return; }
     const prompts = promptsInput.value.split(",").map(s => s.trim()).filter(Boolean);
-    if (!prompts.length) { setStatus("Enter at least one object prompt.", true); return; }
+    // MobileNet finds its own fixed vocabulary — prompts are ignored.
+    if (!prompts.length && samBackend() !== "mobilenet") { setStatus("Enter at least one object prompt.", true); return; }
     setStatus("Sending…");
     try {
       const data = await postSam(fileBlob, prompts);
       lastRaw = data;
       rawOut.textContent = JSON.stringify(data, null, 2);
-      // Meta and browser-local SAM return pixels in the sent image, but
-      // the canvas may differ in size — normalize at sent size, then
-      // scale to the canvas.
-      const direct = data.meta || data.browser;
+      // Meta, browser-local SAM and MobileNet return pixels in the sent
+      // image, but the canvas may differ in size — normalize at sent
+      // size, then scale to the canvas.
+      const direct = data.meta || data.browser || data.mobilenet;
       let NW = canvas.width, NH = canvas.height, rescale = 1;
       if (direct && data.sentW) {
         NW = data.sentW; NH = data.sentH;
@@ -243,6 +244,7 @@
   async function postSam(blob, prompts) {
     if (samBackend() === "browser") return postSamLocal(blob, prompts);
     if (samBackend() === "clip") return postSamClip(blob, prompts);
+    if (samBackend() === "mobilenet") return postSamMobileNet();
     if (isMetaEndpoint(endpointInput.value)) return postSamMeta(blob, prompts);
     // Generic detector-style backend: multipart image + JSON prompts.
     const fd = new FormData();
@@ -318,6 +320,28 @@
       return ` Heading ${proj.heading_deg}° from photo EXIF.`;
     }
     return "";
+  }
+
+  // Browser MobileNet (coco-ssd, MobileNetV2 backbone): a fixed ~80-kind
+  // vocabulary (person, car, chair, …), so prompts are ignored. Boxes
+  // come back in sent-image pixels, like the other direct paths.
+  async function postSamMobileNet() {
+    if (!window.MG_MOBILE) throw new Error("mobilenet.js failed to load.");
+    if (!imgEl) throw new Error("Pick a photo first.");
+    setStatus("Loading MobileNet (one-time few-MB download, then offline)…");
+    await window.MG_MOBILE.ensureModel((label, frac) => {
+      setStatus(`Fetching ${label}… ${Math.round(frac * 100)}%`);
+    });
+    // Phone photos are huge — cap the long edge so detection stays fast.
+    const scale = Math.min(1, 1600 / Math.max(imgEl.naturalWidth, imgEl.naturalHeight));
+    const w = Math.max(1, Math.round(imgEl.naturalWidth * scale));
+    const h = Math.max(1, Math.round(imgEl.naturalHeight * scale));
+    const c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    c.getContext("2d").drawImage(imgEl, 0, 0, w, h);
+    setStatus("Finding known objects with MobileNet…");
+    const found = await window.MG_MOBILE.detect(c);
+    return { mobilenet: true, results: found, sentW: w, sentH: h };
   }
 
   // Local CLIP windows: the backend scores sliding windows against the
@@ -704,6 +728,39 @@
     radiusInput = $("radiusInput"), simInput = $("simInput");
   let lastBatch = null, batchLayers = null;
 
+  // Zip drop zone at the top of the section-6 form: drag-and-drop plus
+  // click-to-browse, sharing zipInput as the fallback picker.
+  const zipDrop = $("zipDrop");
+  function zipName() {
+    const f = zipInput.files[0];
+    zipDrop.innerHTML = f
+      ? `Selected: <b></b> (${(f.size / 1024).toFixed(0)} KB) — drop another .zip or click to change.`
+      : `Drop a <b>.zip</b> of photos here, or click to pick one.`;
+    if (f) zipDrop.querySelector("b").textContent = f.name;
+  }
+  if (zipDrop) {
+    zipDrop.addEventListener("click", () => zipInput.click());
+    zipDrop.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); zipInput.click(); }
+    });
+    zipInput.addEventListener("change", zipName);
+    ["dragenter", "dragover"].forEach((ev) => zipDrop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      zipDrop.classList.add("over");
+    }));
+    ["dragleave", "drop"].forEach((ev) => zipDrop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      zipDrop.classList.remove("over");
+    }));
+    zipDrop.addEventListener("drop", (e) => {
+      const dt = e.dataTransfer;
+      if (dt && dt.files && dt.files.length) {
+        zipInput.files = dt.files;
+        zipName();
+      }
+    });
+  }
+
   batchBtn.addEventListener("click", async () => {
     const zf = zipInput.files[0];
     if (!zf) { batchOut.textContent = "Pick a zip of photos first."; return; }
@@ -815,6 +872,89 @@
     });
     map.fitBounds(bounds, { padding: [20, 20] });
   }
+
+  // 3D reconstruction: the same zip as section 6, POSTed to /api/sfm
+  // with the current batch detections per image when available, then
+  // rendered as raw + labeled point clouds. three.js loads lazily
+  // (dynamic import of sfm3d.js) so the page opens cleanly even when
+  // the CDN is unreachable; a 503 (no COLMAP on the server) degrades
+  // to a plain message.
+  const sfmBtn = $("sfmBtn"), sfmOut = $("sfmOut");
+  let sfmViews = [];
+
+  // Detections from the last batch reply, keyed by image file name:
+  // [{label, box, score}] in original pixels, the /api/sfm convention.
+  function sfmDetections() {
+    const map = {};
+    if (!lastBatch || !Array.isArray(lastBatch.images)) return { map, images: 0 };
+    let n = 0;
+    lastBatch.images.forEach((im) => {
+      const dets = (im.detections || []).filter((d) => Array.isArray(d.box) && d.box.length >= 4).map((d) => ({
+        label: d.label || "object",
+        box: d.box.slice(0, 4).map(Math.round),
+        score: typeof d.score === "number" ? d.score : null,
+      }));
+      if (!dets.length) return;
+      map[im.name] = dets;
+      const base = String(im.name).split(/[\\/]/).pop();
+      if (base && base !== im.name) map[base] = dets;
+      n++;
+    });
+    return { map, images: n };
+  }
+
+  if (sfmBtn) sfmBtn.addEventListener("click", async () => {
+    const zf = zipInput.files[0];
+    if (!zf) { sfmOut.textContent = "Pick a zip of photos in section 6 first."; return; }
+    sfmOut.textContent = "Reconstructing 3D — feature matching takes a while on many photos…";
+    try {
+      const { map: dets, images: nDet } = sfmDetections();
+      const fd = new FormData();
+      fd.append("zipfile", zf);
+      fd.append("detections", JSON.stringify(dets));
+      fd.append("use_gpu", "1");
+      const res = await fetch("/api/sfm", { method: "POST", body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 503) {
+        sfmOut.textContent = "3D unavailable: the server has no COLMAP installed " +
+          "(install the COLMAP CLI or pycolmap to enable /api/sfm). " +
+          "Batch detection + map pins above keep working.";
+        return;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(data.error || "request failed").slice(0, 200)}`);
+      if (data.error) throw new Error(data.error);
+      let lib;
+      try {
+        lib = await import("./sfm3d.js");
+      } catch (e) {
+        sfmOut.textContent = "3D data arrived, but the three.js library could not load " +
+          "(needs internet for the pinned CDN) — try again online.";
+        return;
+      }
+      if (!data.ply) throw new Error("the server returned no point cloud");
+      const cloud = lib.parsePly(data.ply);
+      if (!cloud.count) throw new Error("the server returned an empty point cloud");
+      sfmViews.forEach((v) => v.dispose());
+      sfmViews = [
+        lib.renderCloud($("sfmRaw"), $("sfmRawPopup"), cloud.positions, cloud.colors, data.point_labels || null),
+        lib.renderCloud($("sfmLabeled"), $("sfmLabeledPopup"),
+          cloud.positions, lib.labeledColors(cloud.count, data.point_labels || {}), data.point_labels || null),
+      ];
+      $("sfmRawEmpty").hidden = true;
+      $("sfmLabeledEmpty").hidden = true;
+      const unreg = (data.unregistered || []).length;
+      const warns = (data.warnings || []).join(" ");
+      sfmOut.textContent = `Done — ${cloud.count} 3D point(s)` +
+        (data.total_points > cloud.count ? ` (downsampled from ${data.total_points})` : "") +
+        ` from ${(data.registered || []).length} placed photo(s)` +
+        (unreg ? `, ${unreg} photo(s) COLMAP could not place` : "") +
+        (nDet ? `, labels voted from ${nDet} batch image(s)` : ", no batch detections to vote labels from") +
+        (data.gpu_used ? " (GPU)." : ".") +
+        (warns ? ` Note: ${warns}` : "");
+    } catch (e) {
+      sfmOut.textContent = `Error: ${e.message}`;
+    }
+  });
 
   // Raw detections out of a backend reply, untouched by canvas scaling:
   // [{label, box:[x1,y1,x2,y2] original-px, score}]. Our backend emits

@@ -11,6 +11,14 @@
   <link rel="apple-touch-icon" href="icon.svg">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+    }
+  }
+  </script>
 </head>
 <body>
   <header>
@@ -65,7 +73,8 @@
       <label class="row"><input type="radio" name="samBackend" value="api" checked> API SAM 3.1 (needs internet + token below)</label>
       <label class="row"><input type="radio" name="samBackend" value="browser"> Browser SAM3-INT8 (~930 MB once, then fully offline; WebGPU recommended)</label>
       <label class="row"><input type="radio" name="samBackend" value="clip"> Local CLIP windows (~350 MB once, then offline; coarse boxes, no token needed)</label>
-      <p class="hint">Browser and CLIP modes still use the local backend for depth + map pins (localhost works offline).</p>
+      <label class="row"><input type="radio" name="samBackend" value="mobilenet"> Browser MobileNet objects (a few MB once, then offline; ~80 known kinds like person/car/chair — prompts ignored)</label>
+      <p class="hint">Browser, CLIP and MobileNet modes still use the local backend for depth + map pins (localhost works offline).</p>
       <label>Endpoint (API mode)
         <input type="text" id="endpointInput" autocomplete="off" spellcheck="false">
       </label>
@@ -100,6 +109,10 @@
 
     <section class="card">
       <h2>6. Batch (zip of photos)</h2>
+      <div id="zipDrop" class="drop-zone" role="button" tabindex="0"
+        aria-label="Drop a zip of photos here, or activate to pick one">
+        Drop a <b>.zip</b> of photos here, or click to pick one.
+      </div>
       <input type="file" id="zipInput" accept=".zip,application/zip">
       <p class="hint">Up to 20 photos. Each needs EXIF GPS (or press Get GPS location above as fallback); EXIF direction is used per photo unless Heading is set. Same prompts as section 2.</p>
       <label>Merge radius, metres (same-type pins closer than this may fuse)
@@ -115,11 +128,39 @@
       <ul id="mergedList"><li class="hint">No batch yet.</li></ul>
       <button type="button" id="mergedBtn" disabled>Download merged JSON</button>
     </section>
+
+    <section class="card">
+      <h2>7. 3D reconstruction</h2>
+      <p class="hint">Uses the same zip picked in section 6. Needs the COLMAP backend on the server.</p>
+      <button type="button" id="sfmBtn" class="primary">Reconstruct 3D</button>
+      <p id="sfmOut" role="status"></p>
+      <div class="sfm-grid">
+        <div class="sfm-cell">
+          <h3>Raw cloud</h3>
+          <div id="sfmRawWrap" class="sfm-wrap">
+            <div id="sfmRaw" class="sfm-view"></div>
+            <p class="hint sfm-empty" id="sfmRawEmpty">No 3D data yet — reconstruct a zip first.</p>
+            <div class="sfm-popup" id="sfmRawPopup" hidden></div>
+          </div>
+          <p class="hint">Drag to orbit, scroll or pinch to zoom. Click a point to identify it.</p>
+        </div>
+        <div class="sfm-cell">
+          <h3>Labeled cloud</h3>
+          <div id="sfmLabeledWrap" class="sfm-wrap">
+            <div id="sfmLabeled" class="sfm-view"></div>
+            <p class="hint sfm-empty" id="sfmLabeledEmpty">No 3D data yet — reconstruct a zip first.</p>
+            <div class="sfm-popup" id="sfmLabeledPopup" hidden></div>
+          </div>
+          <p class="hint">Drag to orbit, scroll or pinch to zoom. Click a point to identify it.</p>
+        </div>
+      </div>
+    </section>
   </main>
 
   <script src="config.js"></script>
   <script src="exif.js"></script>
   <script src="sam3local.js"></script>
+  <script src="mobilenet.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="app.js"></script>
 </body>

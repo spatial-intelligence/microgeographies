@@ -33,6 +33,37 @@ The request matches the proven Colab shape: one POST per concept with
 {"type": "input_image", "image_url": "data:..."}]}]}`. Boxes are pulled
 from each reply and drawn scaled to the displayed image.
 
+## Run in Docker (COLMAP + GPU)
+
+`Dockerfile` + `docker-compose.yml` pack the page, the API, and a
+GPU-built COLMAP 3.9.1 (Ceres 2.2.0, CUDA 12.6) into one image, so
+`/api/sfm` works instead of returning 503.
+
+Host needs: an NVIDIA driver, Docker, and the NVIDIA Container Toolkit.
+Then:
+
+```sh
+docker compose up --build
+```
+
+Open http://localhost:8000 in a browser. The first build compiles Ceres
++ COLMAP from source (~30–60 min, mostly unattended); later starts reuse
+the image and the `hf-cache` volume (model weights persist). To compile
+faster, narrow `CUDA_ARCHS` in `docker-compose.yml` to your card
+(`86` Ampere, `89` Ada, `90` Hopper).
+
+Check the GPU made it through:
+
+```sh
+docker exec microgeo-microgeo-1 nvidia-smi -L
+```
+
+`/api/sfm` replies carry `gpu_used: true` when COLMAP ran on CUDA.
+Without a GPU the same compose file still works (remove the
+`deploy.resources.reservations.devices` block): the entrypoint says so
+at startup and COLMAP runs on CPU with a warning. `MOCK_SAM=1` stays the
+default, as in `./run.sh`; unset it for real SAM 3.
+
 The photo is downscaled to max 1600px on the long edge and sent as JPEG
 (phone originals are too large and sometimes an unaccepted format).
 Each reply's `output[].content[]` text carries tokens like
@@ -90,11 +121,54 @@ Pure geometry/EXIF helpers have unit tests with no model or network:
 .venv/bin/python backend/test_clip.py            # proposals, CLIP pick top-k/NMS (injected scorer)
 .venv/bin/python backend/test_e2e_mock.py        # full HTTP loop, mock SAM + mock depth
 .venv/bin/python backend/test_osm_snap_stub.py   # OSM snap wiring via a local stub
+.venv/bin/python backend/test_sfm.py             # SfM helpers + /api/sfm 503 path, no COLMAP/GPU needed
 ```
+
+## COLMAP SfM backend (optional 3D reconstruction)
+
+`POST /api/sfm` takes a multipart `zipfile` (same photo filter and
+20-image/200 MB caps as `/api/batch`), an optional `detections` JSON
+string mapping image filename to `[{label, box: [x1,y1,x2,y2], score}]`
+in original pixels (same convention as `/api/project`), and an optional
+`use_gpu` flag (default `"1"`).
+
+The server unzips to a temp dir and runs COLMAP — CLI preferred
+(feature extraction + exhaustive matching + mapping), pycolmap fallback
+when the binary is missing. GPU choice is automatic: CUDA is used only
+when `torch.cuda` or `nvidia-smi` reports a real GPU, otherwise CPU
+flags are passed; `use_gpu=0` forces CPU. The sparse model
+(`SIMPLE_PINHOLE` and `PINHOLE` supported) is parsed, downsampled to at
+most ~50000 points, and returned as inline ASCII PLY text plus
+`cameras` (`[{image, qvec, tvec, width, height, model, params}]`) and
+`point_labels` (`{point_index: {label, votes}}`). Label voting projects
+each 3D point into every registered image via its pose + camera model
+and votes the label of each detection box the projection lands in
+(majority wins). `gpu_used` and `warnings` ride along; `registered` /
+`unregistered` list which photos COLMAP could place.
+
+Without the COLMAP CLI *and* pycolmap the endpoint returns HTTP 503
+with a JSON error (never 500) — every other endpoint keeps working.
+
+## 3D reconstruction in the page (section 7)
+
+Section 6 grew a drag-and-drop `.zip` zone (click-to-browse fallback is
+the original file input). Section 7, "3D reconstruction", sends that
+same zip to `POST /api/sfm` via a "Reconstruct 3D" button, attaching
+the current batch detections per image (matched by file name) when a
+batch has been processed, so points can be label-voted.
+
+Results render as two side-by-side three.js viewers (pinned
+`three@0.186.1` import map, `sfm3d.js`): the raw cloud in its own
+colors and the labeled cloud in per-class colors. Drag orbits, scroll
+or pinch zooms, and clicking a point pops a bubble with its feature
+class (+ votes/score when the server sent them). three.js loads lazily
+only after data arrives, so the page opens with no console errors
+offline; when the server 503s (no COLMAP) the section says so plainly
+instead of rendering.
 
 ## Offline browser SAM (INT8, no internet after setup)
 
-Section 4 offers two detectors: API SAM 3.1, or Browser SAM3-INT8
+Section 4 offers four detectors: API SAM 3.1, Browser SAM3-INT8,
 (`rusen/sam3-browser-int8`: dynamic-INT8-quantized SAM3 splits run
 under ONNX Runtime Web — 466 MB image encoder, 387 MB language
 encoder, 35 MB decoder). The weights download once (~930 MB with
@@ -112,6 +186,17 @@ checked words; the model math itself was validated end to end with
 onnxruntime CPU (a "door" prompt on the test facade returned
 `[510.8, 421.6, 689.8, 698.8]` at 0.772 against a
 `[520, 430, 680, 700]` ground truth).
+
+## Browser MobileNet objects (fourth option, known kinds)
+
+Section 4 also offers Browser MobileNet objects: `mobilenet.js` loads
+TensorFlow.js plus the coco-ssd detector (MobileNetV2 backbone, a few
+MB once, then offline via the service-worker vendor cache) and finds
+~80 known COCO kinds (person, car, chair, bottle, dog, …) with boxes —
+no prompts needed, so the prompts field is ignored in this mode. Boxes
+flow through the same depth + pins + map path as the other direct
+detectors. It is the fastest in-browser option and a good first try
+before the heavier SAM/CLIP downloads.
 
 ## Offline CLIP detector (third option, coarse boxes)
 
@@ -183,7 +268,7 @@ An explicit per-item `format: "xyxy" | "xywh"` always wins.
 
 ## Files
 
-- `index.html`, `styles.css`, `app.js` — the page
+- `index.html`, `styles.css`, `app.js` — the page (`sam3local.js`, `mobilenet.js` — in-browser detectors)
 - `config.js` — public defaults (endpoint, prompts, mock on/off)
 - `manifest.webmanifest`, `sw.js`, `icon.svg` — PWA install + offline shell
 - `server/proxy.mjs` — injects the API token server-side, streams to SAM

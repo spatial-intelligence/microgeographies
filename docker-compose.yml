@@ -1,0 +1,43 @@
+# Microgeographies with COLMAP (GPU) — pass the host GPU through.
+#
+#   docker compose up --build    # first build compiles Ceres + COLMAP: ~30-60 min
+#   open http://localhost:8000
+#
+# Needs on the host: an NVIDIA driver, Docker, and the NVIDIA Container
+# Toolkit (nvidia-container-toolkit). Without a GPU the same file still
+# works — drop the `deploy.resources.reservations.devices` block (or run
+# plain `docker build` + `docker run`) and COLMAP falls back to CPU.
+services:
+  microgeo:
+    build:
+      context: .
+      args:
+        # Narrow to your card to compile faster, e.g. ["86"] (Ampere),
+        # ["89"] (Ada), ["90"] (Hopper). Must be a ";"-joined string.
+        CUDA_ARCHS: "70;75;80;86;90"
+    image: microgeo:colmap-gpu
+    ports:
+      - "8000:8000"
+    environment:
+      # Same default as ./run.sh: deterministic demo SAM boxes, no weight
+      # download. Unset/empty it for real SAM 3 (needs GPU for speed).
+      MOCK_SAM: "1"
+      # Model weights persist in this volume across restarts.
+      HF_HOME: /hf-cache
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+    volumes:
+      - hf-cache:/hf-cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Torch data loading + COLMAP mapping like headroom.
+    shm_size: 2gb
+    restart: unless-stopped
+
+volumes:
+  hf-cache:

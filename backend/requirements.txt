@@ -5,3 +5,7 @@ pillow
 numpy
 torch
 transformers
+# Optional: COLMAP SfM backend (/api/sfm). Needs EITHER the COLMAP CLI
+# binary on PATH (https://colmap.github.io) OR `pip install pycolmap`.
+# Without either, /api/sfm returns HTTP 503; everything else is unaffected.
+# pycolmap  # uncomment to enable the /api/sfm fallback without the CLI
