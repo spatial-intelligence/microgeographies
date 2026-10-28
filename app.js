@@ -721,15 +721,62 @@
     statusOut.style.color = isErr ? "#b00020" : "";
   }
 
+  // Processing routes: one mode switch at the top, each mode showing
+  // only its sections (renumbered in place). Depth runs solely inside
+  // the two routes that need pins (single photo, batch); the 3D route
+  // is COLMAP geometry with depth-free labels.
+  const MODES = {
+    single: { sections: ["secPhoto", "secObjects", "secLoc", "secDetector", "secResults"],
+              note: "Single-photo route: detect, depth, map pin." },
+    "set-depth": { sections: ["secSet", "secBatch"],
+              note: "Set route: the shared zip + concepts above; depth runs per photo for pins." },
+    "set-3d": { sections: ["secSet", "secSfm"],
+              note: "Set route: the shared zip + concepts above; COLMAP only — no depth pass." },
+  };
+  const modeOut = $("modeOut");
+  function currentMode() {
+    const el = document.querySelector('input[name="mode"]:checked');
+    return (el && MODES[el.value]) ? el.value : "single";
+  }
+  function setMode(mode) {
+    if (!MODES[mode]) mode = "single";
+    document.querySelectorAll('input[name="mode"]').forEach((el) => {
+      el.checked = el.value === mode;
+    });
+    const vis = MODES[mode].sections;
+    let n = 0;
+    ["secPhoto", "secObjects", "secLoc", "secDetector", "secResults",
+     "secSet", "secBatch", "secSfm"].forEach((id) => {
+      const sec = $(id);
+      if (!sec) return;
+      const show = vis.indexOf(id) >= 0;
+      sec.hidden = !show;
+      if (show) {
+        n++;
+        const h = sec.querySelector("h2");
+        if (h) h.textContent = `${n}. ${sec.dataset.title || h.textContent}`;
+      }
+    });
+    if (modeOut) modeOut.textContent = MODES[mode].note;
+    document.body.classList.toggle("wide", mode === "set-3d");
+    try { localStorage.setItem("mg.mode", mode); } catch (e) { /* private mode */ }
+  }
+  document.querySelectorAll('input[name="mode"]').forEach((el) => {
+    el.addEventListener("change", () => setMode(el.value));
+  });
+  try { setMode(localStorage.getItem("mg.mode") || "single"); }
+  catch (e) { setMode("single"); }
+
   // Batch: a zip of photos in, per-image previews + JSON plus one merged
   // feature set out. Same origin (/api/batch) like /api/project.
   const zipInput = $("zipInput"), batchBtn = $("batchBtn"), batchOut = $("batchOut"),
     batchGrid = $("batchGrid"), mergedList = $("mergedList"), mergedBtn = $("mergedBtn"),
-    radiusInput = $("radiusInput"), simInput = $("simInput");
+    radiusInput = $("radiusInput"), simInput = $("simInput"),
+    setConcepts = $("setConcepts"), setDetector = $("setDetector");
   let lastBatch = null, batchLayers = null;
 
-  // Zip drop zone at the top of the section-6 form: drag-and-drop plus
-  // click-to-browse, sharing zipInput as the fallback picker.
+  // Shared zip drop zone: drag-and-drop plus click-to-browse, sharing
+  // zipInput as the fallback picker. One upload feeds both set routes.
   const zipDrop = $("zipDrop");
   function zipName() {
     const f = zipInput.files[0];
@@ -764,13 +811,14 @@
   batchBtn.addEventListener("click", async () => {
     const zf = zipInput.files[0];
     if (!zf) { batchOut.textContent = "Pick a zip of photos first."; return; }
-    const prompts = promptsInput.value.split(",").map(s => s.trim()).filter(Boolean);
-    if (!prompts.length) { batchOut.textContent = "Enter at least one object prompt."; return; }
+    const prompts = setConcepts.value.split(",").map(s => s.trim()).filter(Boolean);
+    if (!prompts.length) { batchOut.textContent = "Enter at least one concept above."; return; }
     batchOut.textContent = "Processing… depth runs per photo, so a dozen images take a while.";
     try {
       const fd = new FormData();
       fd.append("zipfile", zf);
       fd.append("concepts", JSON.stringify(prompts));
+      fd.append("detector", (setDetector && setDetector.value) || "sam");
       locationFields(fd);
       const hdg = currentHeading();
       if (hdg != null) fd.append("heading", String(hdg));
@@ -873,46 +921,29 @@
     map.fitBounds(bounds, { padding: [20, 20] });
   }
 
-  // 3D reconstruction: the same zip as section 6, POSTed to /api/sfm
-  // with the current batch detections per image when available, then
-  // rendered as raw + labeled point clouds. three.js loads lazily
+  // 3D reconstruction: the shared zip, POSTed to /api/sfm with the
+  // set concepts for depth-free server-side labels (empty concepts =
+  // unlabeled cloud, fastest). No depth pass runs on this route.
+  // Rendered as raw + labeled point clouds; three.js loads lazily
   // (dynamic import of sfm3d.js) so the page opens cleanly even when
   // the CDN is unreachable; a 503 (no COLMAP on the server) degrades
   // to a plain message.
   const sfmBtn = $("sfmBtn"), sfmOut = $("sfmOut");
   let sfmViews = [];
 
-  // Detections from the last batch reply, keyed by image file name:
-  // [{label, box, score}] in original pixels, the /api/sfm convention.
-  function sfmDetections() {
-    const map = {};
-    if (!lastBatch || !Array.isArray(lastBatch.images)) return { map, images: 0 };
-    let n = 0;
-    lastBatch.images.forEach((im) => {
-      const dets = (im.detections || []).filter((d) => Array.isArray(d.box) && d.box.length >= 4).map((d) => ({
-        label: d.label || "object",
-        box: d.box.slice(0, 4).map(Math.round),
-        score: typeof d.score === "number" ? d.score : null,
-      }));
-      if (!dets.length) return;
-      map[im.name] = dets;
-      const base = String(im.name).split(/[\\/]/).pop();
-      if (base && base !== im.name) map[base] = dets;
-      n++;
-    });
-    return { map, images: n };
-  }
-
   if (sfmBtn) sfmBtn.addEventListener("click", async () => {
     const zf = zipInput.files[0];
-    if (!zf) { sfmOut.textContent = "Pick a zip of photos in section 6 first."; return; }
-    sfmOut.textContent = "Reconstructing 3D — feature matching takes a while on many photos…";
+    if (!zf) { sfmOut.textContent = "Pick a zip of photos above first."; return; }
+    const concepts = setConcepts.value.split(",").map(s => s.trim()).filter(Boolean);
+    sfmOut.textContent = concepts.length
+      ? "Detecting labels (boxes only, no depth), then reconstructing 3D — matching takes a while on many photos…"
+      : "Reconstructing 3D unlabeled (no detection, no depth)…";
     try {
-      const { map: dets, images: nDet } = sfmDetections();
       const fd = new FormData();
       fd.append("zipfile", zf);
-      fd.append("detections", JSON.stringify(dets));
-      fd.append("use_gpu", "1");
+      fd.append("concepts", JSON.stringify(concepts));
+      fd.append("detector", (setDetector && setDetector.value) || "sam");
+      fd.append("use_gpu", ($("sfmCpu") && $("sfmCpu").checked) ? "0" : "1");
       const res = await fetch("/api/sfm", { method: "POST", body: fd });
       const data = await res.json().catch(() => ({}));
       if (res.status === 503) {
@@ -944,11 +975,12 @@
       $("sfmLabeledEmpty").hidden = true;
       const unreg = (data.unregistered || []).length;
       const warns = (data.warnings || []).join(" ");
+      const nLab = Object.keys(data.point_labels || {}).length;
       sfmOut.textContent = `Done — ${cloud.count} 3D point(s)` +
         (data.total_points > cloud.count ? ` (downsampled from ${data.total_points})` : "") +
         ` from ${(data.registered || []).length} placed photo(s)` +
         (unreg ? `, ${unreg} photo(s) COLMAP could not place` : "") +
-        (nDet ? `, labels voted from ${nDet} batch image(s)` : ", no batch detections to vote labels from") +
+        (concepts.length ? `, ${nLab} labeled point(s) (no depth pass)` : ", unlabeled cloud") +
         (data.gpu_used ? " (GPU)." : ".") +
         (warns ? ` Note: ${warns}` : "");
     } catch (e) {

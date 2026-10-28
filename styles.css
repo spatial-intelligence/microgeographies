@@ -21,7 +21,7 @@ header p { margin: 0 0 12px; font-size: 0.85rem; }
 .card h2 { font-size: 1rem; margin: 0 0 8px; }
 label { display: block; margin: 8px 0; font-size: 0.9rem; }
 label.row { display: flex; gap: 8px; align-items: center; }
-input[type="text"], input[type="password"] { display: block; width: 100%; margin-top: 4px; padding: 8px; font-size: 1rem; }
+input[type="text"], input[type="password"], select { display: block; width: 100%; margin-top: 4px; padding: 8px; font-size: 1rem; }
 button { padding: 10px 16px; font-size: 1rem; margin: 6px 6px 6px 0; cursor: pointer; border-radius: 6px; border: 1px solid #8886; background: transparent; color: inherit; }
 button.primary { font-weight: 700; background: var(--accent); border-color: var(--accent); color: #fff; }
 button:disabled { opacity: 0.45; cursor: default; }
@@ -56,4 +56,8 @@ button:disabled { opacity: 0.45; cursor: default; }
   pointer-events: none;
 }
 #sfmOut { font-weight: 600; }
+/* Desktop 3D route: the page goes wide and the viewers grow with it.
+ * Narrow screens keep the single-column phone layout below. */
+body.wide { max-width: 1100px; }
+body.wide .sfm-view { height: 480px; }
 @media (max-width: 560px) { .sfm-grid { grid-template-columns: 1fr; } }

@@ -17,7 +17,7 @@
 ARG CUDA_VERSION=12.6.3
 ARG UBUNTU_VERSION=22.04
 ARG COLMAP_VERSION=3.9.1
-ARG CUDA_ARCHS=70;75;80;86;90
+ARG CUDA_ARCHS=70;75;80;86;89;90
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 ARG COLMAP_VERSION
@@ -55,7 +55,12 @@ RUN git clone --depth 1 --branch 2.2.0 https://github.com/ceres-solver/ceres-sol
 
 # COLMAP with CUDA, headless (no GUI/Qt). Installs `colmap` onto PATH,
 # which is exactly what backend/sfm.py looks up via shutil.which.
+# COLMAP 3.9.x misses `#include <memory>` in src/colmap/image/line.cc,
+# which newer GCC (Ubuntu 22.04) rejects. Harmless no-op once upstream
+# carries the include.
 RUN git clone --depth 1 --branch "${COLMAP_VERSION}" https://github.com/colmap/colmap.git /tmp/colmap \
+ && sed -i 's|^extern "C" {|#include <memory>\nextern "C" {|' /tmp/colmap/src/colmap/image/line.cc \
+ && grep -q '#include <memory>' /tmp/colmap/src/colmap/image/line.cc \
  && cmake -S /tmp/colmap -B /tmp/colmap/build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DGUI_ENABLED=OFF \
@@ -63,7 +68,7 @@ RUN git clone --depth 1 --branch "${COLMAP_VERSION}" https://github.com/colmap/c
  && cmake --build /tmp/colmap/build -j"$(nproc)" \
  && cmake --install /tmp/colmap/build \
  && rm -rf /tmp/colmap \
- && colmap --version
+ && colmap help >/dev/null
 
 # App venv. Plain `torch` from PyPI ships CUDA wheels, so torch.cuda
 # works inside the container once a GPU is passed through.

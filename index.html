@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>MicroGeo Capture Tool v0.5</title>
+  <title>MicroGeo Capture Tool v0.6</title>
   <meta name="description" content="Test page: upload a photo, send it to SAM 3.1 with object prompts, get bounding boxes back with GPS.">
   <meta name="theme-color" content="#1a2b1f">
   <link rel="manifest" href="manifest.webmanifest">
@@ -22,13 +22,21 @@
 </head>
 <body>
   <header>
-    <h1>MicroGeo Capture Tool <span class="ver">v0.5</span></h1>
+    <h1>MicroGeo Capture Tool <span class="ver">v0.6</span></h1>
     <p class="tagline">Collect delivery-point microgeography: photo → depth → map pin.</p>
     <p id="secureNote"></p>
   </header>
 
   <main>
-    <section class="card">
+    <section class="card" id="modeCard">
+      <h2>What are you processing?</h2>
+      <label class="row"><input type="radio" name="mode" value="single" checked> <span><b>Single photo</b> — detect objects, monocular depth, map pin.</span></label>
+      <label class="row"><input type="radio" name="mode" value="set-depth"> <span><b>Photo set → pins</b> — zip in, depth + merged map pins per photo.</span></label>
+      <label class="row"><input type="radio" name="mode" value="set-3d"> <span><b>Photo set → 3D</b> — zip in, COLMAP cloud with labels. No depth pass.</span></label>
+      <p class="hint" id="modeOut">Single-photo route: only sections below marked for it are used.</p>
+    </section>
+
+    <section class="card" id="secPhoto" data-title="Photo">
       <h2>1. Photo</h2>
       <input type="file" id="fileInput" accept="image/*" capture="environment">
       <p class="hint">On a phone this opens the camera. GPS is read at send time so the photo location can be mapped later.</p>
@@ -36,14 +44,14 @@
       <canvas id="photoCanvas"></canvas>
     </section>
 
-    <section class="card">
+    <section class="card" id="secObjects" data-title="Objects to find">
       <h2>2. Objects to find</h2>
       <label>Prompts (comma separated)
         <input type="text" id="promptsInput" value="door, steps" autocomplete="off">
       </label>
     </section>
 
-    <section class="card">
+    <section class="card" id="secLoc" data-title="Location &amp; heading">
       <h2>3. Location &amp; heading</h2>
       <button type="button" id="gpsBtn">Get GPS location</button>
       <p id="gpsOut">No location yet.</p>
@@ -68,7 +76,7 @@
       <p class="hint">No GPS? The backend falls back to the photo's EXIF location when you upload a saved photo. Each box is projected to an approx map pin using heading + monocular depth; door/window pins snap to the OpenStreetMap building outline.</p>
     </section>
 
-    <section class="card">
+    <section class="card" id="secDetector" data-title="SAM detector">
       <h2>4. SAM detector</h2>
       <label class="row"><input type="radio" name="samBackend" value="api" checked> API SAM 3.1 (needs internet + token below)</label>
       <label class="row"><input type="radio" name="samBackend" value="browser"> Browser SAM3-INT8 (~930 MB once, then fully offline; WebGPU recommended)</label>
@@ -88,7 +96,7 @@
       <p id="statusOut" role="status"></p>
     </section>
 
-    <section class="card">
+    <section class="card" id="secResults" data-title="Results">
       <h2>5. Results</h2>
       <ul id="boxList"><li class="hint">No results yet.</li></ul>
       <h3>Depth (blue far, red near)</h3>
@@ -107,14 +115,28 @@
       <p class="hint">Re-project reuses the last SAM boxes with the current heading / field-of-view / range — no new SAM call, so you can iterate the geometry fast.</p>
     </section>
 
-    <section class="card">
-      <h2>6. Batch (zip of photos)</h2>
+    <section class="card" id="secSet" data-title="Photo set">
+      <h2>6. Photo set</h2>
       <div id="zipDrop" class="drop-zone" role="button" tabindex="0"
         aria-label="Drop a zip of photos here, or activate to pick one">
         Drop a <b>.zip</b> of photos here, or click to pick one.
       </div>
       <input type="file" id="zipInput" accept=".zip,application/zip">
-      <p class="hint">Up to 20 photos. Each needs EXIF GPS (or press Get GPS location above as fallback); EXIF direction is used per photo unless Heading is set. Same prompts as section 2.</p>
+      <p class="hint">Up to 20 photos. Upload once — both set routes below share this zip. Each photo needs EXIF GPS (or press Get GPS location in single-photo mode as fallback); EXIF direction is used per photo unless a heading is set there.</p>
+      <label>Concepts to find (comma separated)
+        <input type="text" id="setConcepts" value="door, steps" autocomplete="off">
+      </label>
+      <label>Server detector (labels only — browser detectors are single-photo)
+        <select id="setDetector">
+          <option value="sam" selected>Server SAM 3 (precise boxes; needs weights/GPU first time)</option>
+          <option value="clip">Local CLIP windows (coarse boxes, offline after download)</option>
+        </select>
+      </label>
+    </section>
+
+    <section class="card" id="secBatch" data-title="Batch → pins">
+      <h2>7. Batch → pins</h2>
+      <p class="hint">This route runs monocular depth per photo — it has to, pins need range. For geometry without any depth pass, use the 3D route instead.</p>
       <label>Merge radius, metres (same-type pins closer than this may fuse)
         <input type="number" id="radiusInput" value="8" min="1" max="100" step="1">
       </label>
@@ -129,9 +151,10 @@
       <button type="button" id="mergedBtn" disabled>Download merged JSON</button>
     </section>
 
-    <section class="card">
-      <h2>7. 3D reconstruction</h2>
-      <p class="hint">Uses the same zip picked in section 6. Needs the COLMAP backend on the server.</p>
+    <section class="card" id="secSfm" data-title="Photo set → 3D">
+      <h2>8. Photo set → 3D</h2>
+      <p class="hint">Uses the zip picked above. COLMAP geometry only — no depth pass runs. Labels come from the concepts above (leave empty for a fast unlabeled cloud). Needs the COLMAP backend on the server.</p>
+      <label class="row"><input type="checkbox" id="sfmCpu"> Force CPU (skip GPU even when one is visible)</label>
       <button type="button" id="sfmBtn" class="primary">Reconstruct 3D</button>
       <p id="sfmOut" role="status"></p>
       <div class="sfm-grid">

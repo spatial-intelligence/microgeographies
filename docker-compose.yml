@@ -14,7 +14,7 @@ services:
       args:
         # Narrow to your card to compile faster, e.g. ["86"] (Ampere),
         # ["89"] (Ada), ["90"] (Hopper). Must be a ";"-joined string.
-        CUDA_ARCHS: "70;75;80;86;90"
+        CUDA_ARCHS: "70;75;80;86;89;90"
     image: microgeo:colmap-gpu
     ports:
       - "8000:8000"

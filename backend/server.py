@@ -135,6 +135,50 @@ async def detect(
     }
 
 
+def parse_concepts(concepts):
+    """Concept names from a JSON array or comma string (max 10)."""
+    try:
+        names = json.loads(concepts)
+        if isinstance(names, str):
+            names = [names]
+    except (json.JSONDecodeError, TypeError):
+        names = [c.strip() for c in (concepts or "").split(",")
+                 if c.strip()]
+    return [n for n in names if n][:10]
+
+
+def detect_concepts_no_depth(pil_by_name, concepts, detector="sam"):
+    """Boxes for many images with no depth pass (SfM label source).
+
+    Runs run_detections per image and returns (dets, errors): dets maps
+    basename to [{label, box (original pixels), score}], errors holds
+    short distinct failure notes (empty when every image scored).
+    One bad image never sinks the rest, and failures are reported —
+    never swallowed — so an unlabeled cloud always says why.
+    """
+    dets, errors, seen = {}, [], set()
+    for name, pil in (pil_by_name or {}).items():
+        try:
+            boxes = run_detections(pil, concepts, detector=detector or "sam")
+        except Exception as e:
+            note = f"{os.path.basename(name)}: {e}".strip()[:160]
+            if note not in seen:
+                seen.add(note)
+                errors.append(note)
+            continue
+        out = []
+        for b in boxes:
+            box = b.get("box")
+            if not isinstance(box, list) or len(box) < 4:
+                continue
+            out.append({"label": b.get("label", "object"),
+                        "box": [round(float(v)) for v in box[:4]],
+                        "score": b.get("score")})
+        if out:
+            dets[os.path.basename(name)] = out
+    return dets, errors
+
+
 def run_detections(pil, names, detector="sam"):
     """Boxes for one image: SAM (mock or real) or offline CLIP windows."""
     w, h = pil.size
@@ -403,6 +447,8 @@ async def batch(
 async def sfm(
     zipfile: UploadFile = File(...),
     detections: str = Form(default=""),
+    concepts: str = Form(default=""),
+    detector: str = Form(default="sam"),
     use_gpu: str = Form(default="1"),
 ):
     """Reconstruct a zip of photos with COLMAP and label the 3D points.
@@ -410,12 +456,17 @@ async def sfm(
     Multipart fields: `zipfile` (zip archive of photos), `detections`
     (optional JSON mapping image filename to
     [{label, box: [x1,y1,x2,y2], score}] in ORIGINAL pixels, same
-    convention as /api/project), `use_gpu` ("1" default: use CUDA only
-    when actually available; "0" forces CPU).
+    convention as /api/project), `concepts` (optional JSON array or
+    comma string, e.g. ["door"]; detected per image with `detector`
+    to fill images missing from `detections`), `detector`
+    ("sam" | "clip", server-side only), `use_gpu` ("1" default: use
+    CUDA only when actually available; "0" forces CPU).
 
-    GPU choice is automatic: CUDA is used only when torch.cuda or
-    nvidia-smi reports a real GPU, otherwise CPU flags are passed —
-    `use_gpu` is an override to force CPU. Returns 503 (never 500) when
+    No monocular-depth pass runs on this route: labels come from
+    boxes only, and geometry comes from COLMAP. GPU choice is
+    automatic: CUDA is used only when torch.cuda or nvidia-smi
+    reports a real GPU, otherwise CPU flags are passed — `use_gpu`
+    is an override to force CPU. Returns 503 (never 500) when
     neither the COLMAP binary nor pycolmap is installed.
     """
     import tempfile
@@ -465,17 +516,38 @@ async def sfm(
                         "label voting skipped")
 
     try:
+        names_in = parse_concepts(concepts)
         with tempfile.TemporaryDirectory(prefix="sfm-") as tmp:
             img_dir = os.path.join(tmp, "images")
             os.makedirs(img_dir, exist_ok=True)
+            kept = {}  # basename -> PIL (depth-free label source)
             for info in members[:MAX_BATCH_IMAGES]:
                 try:
                     data = zf.read(info.filename)
                     pil = Image.open(io.BytesIO(data)).convert("RGB")
                 except Exception:
                     continue
-                pil.save(os.path.join(img_dir,
-                                      os.path.basename(info.filename)))
+                base = os.path.basename(info.filename)
+                pil.save(os.path.join(img_dir, base))
+                kept[base] = pil
+            # Server-side labels without any depth pass: explicit
+            # detections win per image, concepts fill the rest.
+            if names_in:
+                auto, auto_errors = detect_concepts_no_depth(
+                    {k: v for k, v in kept.items() if k not in dets},
+                    names_in, detector=detector or "sam")
+                if auto:
+                    dets = {**auto, **dets}
+                    warnings.append(
+                        f"detected {len(auto)} image(s) for "
+                        f"{', '.join(names_in)} with {detector or 'sam'} "
+                        "(boxes only, no depth pass)")
+                else:
+                    why = ("; ".join(auto_errors[:3]) if auto_errors
+                           else "no boxes matched the concepts")
+                    warnings.append(
+                        f"concepts detection returned no boxes ({why}): "
+                        "cloud is unlabeled")
             names = sorted(os.listdir(img_dir))
             if len(names) < 2:
                 return {"error": "need at least 2 readable images "
@@ -489,6 +561,11 @@ async def sfm(
                 model_dir)
             warnings.extend(parse_warnings)
             total = len(points)
+            if total == 0:
+                warnings.append("COLMAP returned an empty model (no 3D "
+                                "points): photos matched too weakly to "
+                                "triangulate — retry with more overlap "
+                                "and texture")
             points, colors = sfm_mod.downsample(points, colors)
             if total > len(points):
                 warnings.append(f"downsampled {total} points "

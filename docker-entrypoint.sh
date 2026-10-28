@@ -10,7 +10,7 @@ export HF_HUB_CACHE="$HF_HOME/hub"
 /opt/venv/bin/python backend/preload_depth.py || exit 1
 
 if command -v colmap >/dev/null 2>&1; then
-  echo "colmap: $(colmap --version 2>/dev/null | head -1)"
+  echo "colmap: present ($(colmap help 2>/dev/null | head -1))"
 else
   echo "colmap: MISSING — /api/sfm will return 503 (everything else works)"
 fi

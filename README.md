@@ -55,7 +55,7 @@ faster, narrow `CUDA_ARCHS` in `docker-compose.yml` to your card
 Check the GPU made it through:
 
 ```sh
-docker exec microgeo-microgeo-1 nvidia-smi -L
+docker exec hackathon2026-microgeo-1 nvidia-smi -L
 ```
 
 `/api/sfm` replies carry `gpu_used: true` when COLMAP ran on CUDA.
@@ -129,8 +129,15 @@ Pure geometry/EXIF helpers have unit tests with no model or network:
 `POST /api/sfm` takes a multipart `zipfile` (same photo filter and
 20-image/200 MB caps as `/api/batch`), an optional `detections` JSON
 string mapping image filename to `[{label, box: [x1,y1,x2,y2], score}]`
-in original pixels (same convention as `/api/project`), and an optional
-`use_gpu` flag (default `"1"`).
+in original pixels (same convention as `/api/project`), an optional
+`concepts` array (or comma string) plus `detector` (`"sam"` | `"clip"`,
+server-side only) to detect per-image boxes for images missing from
+`detections`, and an optional `use_gpu` flag (default `"1"`).
+
+No depth pass runs on this route: detection is boxes-only
+(`detect_concepts_no_depth`), so uploading a zip for 3D never triggers
+the monocular-depth model. Explicit `detections` win per image;
+concepts fill the rest; empty concepts means an unlabeled cloud.
 
 The server unzips to a temp dir and runs COLMAP — CLI preferred
 (feature extraction + exhaustive matching + mapping), pycolmap fallback
@@ -149,13 +156,29 @@ and votes the label of each detection box the projection lands in
 Without the COLMAP CLI *and* pycolmap the endpoint returns HTTP 503
 with a JSON error (never 500) — every other endpoint keeps working.
 
-## 3D reconstruction in the page (section 7)
+## Processing routes (mode switch)
 
-Section 6 grew a drag-and-drop `.zip` zone (click-to-browse fallback is
-the original file input). Section 7, "3D reconstruction", sends that
-same zip to `POST /api/sfm` via a "Reconstruct 3D" button, attaching
-the current batch detections per image (matched by file name) when a
-batch has been processed, so points can be label-voted.
+The page opens with "What are you processing?": **Single photo**
+(detect, depth, map pin), **Photo set → pins** (zip in, depth +
+merged pins per photo), or **Photo set → 3D** (zip in, COLMAP cloud
+with labels). Each mode shows only its sections, renumbered in place,
+and the choice persists in `localStorage`.
+
+Both set modes share one upload: a drag-and-drop `.zip` zone
+(click-to-browse fallback is the original file input) plus a concepts
+field and a server-detector select (SAM 3 / CLIP windows; browser
+detectors are single-photo only). Upload once, then run either route —
+or both — without re-uploading.
+
+Depth runs only where pins need range (single photo, batch). The 3D
+route is COLMAP geometry plus depth-free server-side labels: leave the
+concepts empty for a fast unlabeled cloud.
+
+## 3D reconstruction in the page (set → 3D mode)
+
+The "Reconstruct 3D" button sends the shared zip to `POST /api/sfm`
+with the set concepts and detector (plus a force-CPU checkbox mapping
+to `use_gpu=0`), so points are label-voted without any depth pass.
 
 Results render as two side-by-side three.js viewers (pinned
 `three@0.186.1` import map, `sfm3d.js`): the raw cloud in its own
@@ -213,7 +236,7 @@ unchanged.
 
 ## Batch + merged map
 
-Section 6 takes a zip (up to 20 photos): each image runs the full
+Batch → pins mode takes the shared zip (up to 20 photos): each image runs the full
 pipeline with its own EXIF location/direction (live fix as fallback)
 and returns a preview, its pins, and a per-image JSON download.
 `POST /api/batch` also returns one merged GeoJSON: same-type pins fuse

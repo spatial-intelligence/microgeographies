@@ -362,9 +362,74 @@ def _run(cmd, warnings):
         raise RuntimeError(f"{' '.join(cmd[:2])} failed: {tail}")
 
 
+def _sparse_listing(path):
+    """Dir contents for diagnostics (never raises)."""
+    try:
+        return sorted(os.listdir(path))
+    except OSError as e:
+        return [f"<unreadable: {e}>"]
+
+
+def _pick_model_dir(sparse_dir):
+    """Best numeric model dir (largest points file, .txt or .bin).
+
+    The mapper numbers models 0, 1, ... with 0 usually the largest,
+    but size order is not guaranteed — pick by points-file size so a
+    stray empty 0/ never shadows a real reconstruction. None when
+    there is nothing to pick.
+    """
+    best, best_size = None, -1
+    for name in _sparse_listing(sparse_dir):
+        if not name.isdigit():
+            continue
+        model_dir = os.path.join(sparse_dir, name)
+        if not os.path.isdir(model_dir):
+            continue
+        size = -1
+        for fn in ("points3D.txt", "points3D.bin"):
+            try:
+                size = max(size, os.path.getsize(
+                    os.path.join(model_dir, fn)))
+            except OSError:
+                continue
+        if size > best_size:
+            best, best_size = model_dir, size
+    return best
+
+
+def _ensure_text_model(binary, model_dir, warnings, runner=None):
+    """Make sure model_dir holds cameras.txt, converting from binary.
+
+    Recent COLMAP mappers write cameras.bin/images.bin/points3D.bin,
+    which the parser below cannot read — convert in place with
+    model_converter in that case. Raises RuntimeError with a dir
+    listing plus actionable guidance when there is nothing usable.
+    """
+    if runner is None:
+        runner = _run  # resolved at call time: tests may stub sfm._run
+    if os.path.isfile(os.path.join(model_dir, "cameras.txt")):
+        return
+    has_bin = any(os.path.isfile(os.path.join(model_dir, fn))
+                  for fn in ("cameras.bin", "images.bin",
+                             "points3D.bin"))
+    if has_bin:
+        warnings.append("COLMAP wrote a binary model: converting to text")
+        runner([binary, "model_converter",
+                "--input_path", model_dir, "--output_path", model_dir,
+                "--output_type", "TXT"], warnings)
+    if os.path.isfile(os.path.join(model_dir, "cameras.txt")):
+        return
+    raise RuntimeError(
+        f"COLMAP mapper left no usable model in {model_dir} "
+        f"(contains: {_sparse_listing(model_dir)}). This usually means "
+        "too few matching features: use more photos with 60-80% "
+        "overlap, steady lighting, and textured subjects — blank "
+        "walls, glass, and sky do not match.")
+
+
 def run_colmap_cli(images_dir, workspace_dir, gpu_used):
     """Feature extraction + exhaustive matching + mapping. Returns the
-    sparse model dir (workspace/sparse/0). Raises RuntimeError on failure."""
+    best sparse model dir. Raises RuntimeError on failure."""
     warnings = []
     binary = colmap_binary()
     if binary is None:
@@ -385,10 +450,15 @@ def run_colmap_cli(images_dir, workspace_dir, gpu_used):
     _run([binary, "mapper",
           "--database_path", db_path, "--image_path", images_dir,
           "--output_path", sparse_dir], warnings)
-    model_dir = os.path.join(sparse_dir, "0")
-    if not os.path.isdir(model_dir):
-        raise RuntimeError("COLMAP mapper produced no model "
-                           "(too few matches? try more overlap)")
+    model_dir = _pick_model_dir(sparse_dir)
+    if model_dir is None:
+        raise RuntimeError(
+            f"COLMAP mapper produced no model in {sparse_dir} "
+            f"(contains: {_sparse_listing(sparse_dir)}). This usually "
+            "means too few matching features: use more photos with "
+            "60-80% overlap, steady lighting, and textured subjects — "
+            "blank walls, glass, and sky do not match.")
+    _ensure_text_model(binary, model_dir, warnings)
     return model_dir, warnings
 
 
@@ -410,15 +480,31 @@ def run_colmap_pycolmap(images_dir, workspace_dir, gpu_used):
     if extract is None or match is None or mapping is None:
         raise RuntimeError("installed pycolmap lacks extract_features / "
                            "match_exhaustive / incremental_mapping")
-    sift_opts = None
-    try:
-        sift_opts = pycolmap.SiftExtractionOptions()
-        if hasattr(sift_opts, "use_gpu"):
-            sift_opts.use_gpu = bool(gpu_used)
-    except Exception:
+    # Newer pycolmap speaks extraction_options + device; older ones
+    # take sift_options. Prefer the new spelling when present.
+    if hasattr(pycolmap, "FeatureExtractionOptions"):
+        fe_opts = pycolmap.FeatureExtractionOptions()
+        if hasattr(fe_opts, "use_gpu"):
+            fe_opts.use_gpu = bool(gpu_used)
+        kwargs = {"extraction_options": fe_opts}
+        dev = getattr(pycolmap, "Device", None)
+        if dev is not None:
+            for attr in (("cuda", True), ("cpu", False)):
+                if gpu_used == attr[1] and hasattr(dev, attr[0]):
+                    kwargs["device"] = getattr(dev, attr[0])
+                    break
+        extract(db_path, images_dir, **kwargs)
+    else:
         sift_opts = None
-    kwargs = {"sift_options": sift_opts} if sift_opts is not None else {}
-    extract(db_path, images_dir, **kwargs)
+        try:
+            sift_opts = pycolmap.SiftExtractionOptions()
+            if hasattr(sift_opts, "use_gpu"):
+                sift_opts.use_gpu = bool(gpu_used)
+        except Exception:
+            sift_opts = None
+        kwargs = ({"sift_options": sift_opts}
+                  if sift_opts is not None else {})
+        extract(db_path, images_dir, **kwargs)
     match(db_path)
     maps = mapping(db_path, images_dir, sparse_dir)
     if not maps:
