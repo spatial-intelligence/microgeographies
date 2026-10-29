@@ -132,7 +132,9 @@ string mapping image filename to `[{label, box: [x1,y1,x2,y2], score}]`
 in original pixels (same convention as `/api/project`), an optional
 `concepts` array (or comma string) plus `detector` (`"sam"` | `"clip"`,
 server-side only) to detect per-image boxes for images missing from
-`detections`, and an optional `use_gpu` flag (default `"1"`).
+`detections`, and an optional `use_gpu` flag (default `"1"`). The reply
+streams NDJSON: `{type: "log", line}` progress lines while COLMAP runs,
+then one `{type: "result", data}` with the payload below.
 
 No depth pass runs on this route: detection is boxes-only
 (`detect_concepts_no_depth`), so uploading a zip for 3D never triggers

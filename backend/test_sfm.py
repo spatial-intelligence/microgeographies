@@ -215,6 +215,19 @@ def _write(path, text):
         fh.write(text)
 
 
+def _sfm_final_data(response):
+    """/api/sfm streams NDJSON (log lines, then a result): the final
+    result payload of a streamed reply."""
+    import json
+    assert response.status_code == 200, (response.status_code,
+                                         response.text[:200])
+    lines = [ln for ln in response.text.splitlines() if ln.strip()]
+    assert lines, "empty stream"
+    last = json.loads(lines[-1])
+    assert last.get("type") == "result", last
+    return last["data"]
+
+
 _MIN_TEXT_MODEL = {
     "cameras.txt": "1 SIMPLE_PINHOLE 640 480 500 320 240\n",
     "images.txt": "1 1 0 0 0 0 0 0 1 a.jpg\n\n",
@@ -270,7 +283,7 @@ def _fake_colmap_run(write_bins):
     """Stub sfm._run + sfm.colmap_binary simulating a mapper that leaves
     only binary files (or nothing when write_bins is False)."""
     state = {"calls": []}
-    def _fake(cmd, warnings):
+    def _fake(cmd, warnings, emit=None):
         state["calls"].append(cmd[1])
         if cmd[1] == "mapper":
             out = cmd[cmd.index("--output_path") + 1]
@@ -334,7 +347,7 @@ def test_sfm_concepts_label_without_depth():
     def _boom(*a, **k):
         raise AssertionError("no depth pass may run on the SfM route")
     server.get_depth = _boom
-    def _fake_reconstruct(img_dir, workspace_dir, gpu_used):
+    def _fake_reconstruct(img_dir, workspace_dir, gpu_used, emit=None):
         model = os.path.join(workspace_dir, "sparse", "0")
         os.makedirs(model, exist_ok=True)
         _write(os.path.join(model, "cameras.txt"),
@@ -359,8 +372,7 @@ def test_sfm_concepts_label_without_depth():
                                        "application/zip")},
                    data={"concepts": json.dumps(["door"]),
                          "detector": "sam", "use_gpu": "0"})
-        assert r.status_code == 200, (r.status_code, r.text)
-        body = r.json()
+        body = _sfm_final_data(r)
         assert "error" not in body, body
         assert body["point_labels"]["0"]["label"] == "door", body
         assert any("no depth pass" in w for w in body["warnings"]), body
@@ -404,7 +416,7 @@ def test_sfm_concepts_failure_warns_unlabeled():
     sfm.colmap_binary = lambda: "colmap"
     server.run_detections = lambda p, n, detector="sam": (
         _ for _ in ()).throw(RuntimeError("weights missing"))
-    def _fake_reconstruct(img_dir, workspace_dir, gpu_used):
+    def _fake_reconstruct(img_dir, workspace_dir, gpu_used, emit=None):
         model = os.path.join(workspace_dir, "sparse", "0")
         os.makedirs(model, exist_ok=True)
         _write(os.path.join(model, "cameras.txt"),
@@ -428,8 +440,7 @@ def test_sfm_concepts_failure_warns_unlabeled():
                                        "application/zip")},
                    data={"concepts": json.dumps(["door"]),
                          "use_gpu": "0"})
-        assert r.status_code == 200, (r.status_code, r.text)
-        body = r.json()
+        body = _sfm_final_data(r)
         assert "error" not in body, body
         assert body["point_labels"] == {}, body
         assert any("unlabeled" in w and "weights missing" in w
@@ -590,18 +601,64 @@ def test_dense_gpu_flags_probe():
 
 
 def test_run_dense_cli_failure():
+    ws = _ws_with_sparse_model()
     old = sfm._run
-    def _boom(cmd, warnings):
+    def _boom(cmd, warnings, emit=None):
         raise RuntimeError("colmap patch_match_stereo failed: no GPU")
     sfm._run = _boom
     try:
         try:
-            sfm.run_dense_cli("colmap", "/ws", False)
+            sfm.run_dense_cli("colmap", ws, False)
             raise AssertionError("expected RuntimeError")
         except RuntimeError as e:
             assert "patch_match" in str(e) and "no GPU" in str(e), e
     finally:
         sfm._run = old
+
+
+def _ws_with_sparse_model():
+    ws = tempfile.mkdtemp(prefix="sfm-densews-")
+    model = os.path.join(ws, "sparse", "0")
+    os.makedirs(os.path.join(ws, "images"), exist_ok=True)
+    os.makedirs(model, exist_ok=True)
+    _write(os.path.join(model, "points3D.bin"), "fake-binary")
+    return ws
+
+
+def test_run_dense_cli_undistorts_first():
+    """Dense runs undistort -> patch_match -> fusion on the MVS dir."""
+    ws = _ws_with_sparse_model()
+    calls = []
+    old = sfm._run
+    def _fake(cmd, warnings, emit=None):
+        calls.append(cmd[1])
+        if cmd[1] == "image_undistorter":
+            assert cmd[cmd.index("--input_path") + 1].endswith(
+                os.path.join("sparse", "0")), cmd
+            assert cmd[cmd.index("--output_path") + 1].endswith("dense"), cmd
+        if cmd[1] == "patch_match_stereo":
+            assert cmd[cmd.index("--workspace_path") + 1].endswith("dense"), cmd
+        if cmd[1] == "stereo_fusion":
+            out = cmd[cmd.index("--output_path") + 1]
+            _write(out, "fake-ply")
+    sfm._run = _fake
+    try:
+        fused, warnings = sfm.run_dense_cli("colmap", ws, False)
+    finally:
+        sfm._run = old
+    assert [c for c in calls] == ["image_undistorter", "patch_match_stereo",
+                                  "stereo_fusion"], calls
+    assert fused == os.path.join(ws, "fused.ply"), fused
+    assert any("CPU" in w for w in warnings), warnings
+
+
+def test_run_dense_cli_no_sparse_model_helpful():
+    ws = tempfile.mkdtemp(prefix="sfm-denseempty-")
+    try:
+        sfm.run_dense_cli("colmap", ws, False)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "no sparse model" in str(e), e
 
 
 def test_sfm_bad_zip_never_500():
@@ -666,7 +723,7 @@ def _fake_pycolmap_with_gpu_check(gpu_usable, calls, maps_empty=False):
     return fake
 
 
-def _run_pycolmap_fake(gpu_usable, gpu_used, maps_empty=False):
+def _run_pycolmap_fake(gpu_usable, gpu_used, maps_empty=False, emit=None):
     import sys
     calls = {}
     fake = _fake_pycolmap_with_gpu_check(gpu_usable, calls,
@@ -676,7 +733,7 @@ def _run_pycolmap_fake(gpu_usable, gpu_used, maps_empty=False):
     ws = tempfile.mkdtemp(prefix="sfm-gpufallback-")
     try:
         model_dir, warnings = sfm.run_colmap_pycolmap("/imgs", ws,
-                                                      gpu_used)
+                                                      gpu_used, emit)
     finally:
         if old is None:
             del sys.modules["pycolmap"]
@@ -706,6 +763,36 @@ def test_pycolmap_keeps_gpu_when_usable():
     assert not any("falling back" in w for w in warnings), warnings
 
 
+def test_run_streams_tool_lines():
+    """_run with emit forwards each stdout line as it arrives."""
+    import sys
+    seen = []
+    sfm._run([sys.executable, "-c", "print('alpha'); print('beta')"],
+             [], seen.append)
+    assert seen == ["alpha", "beta"], seen
+
+
+def test_run_stream_failure_keeps_tail():
+    """Streaming failures still raise with the tool's log tail."""
+    import sys
+    try:
+        sfm._run([sys.executable, "-c",
+                  "import sys; print('oops'); sys.exit(3)"],
+                 [], lambda s: None)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "oops" in str(e), e
+
+
+def test_pycolmap_emit_announces_stages():
+    """pycolmap path narrates extract/match/map into the log."""
+    said = []
+    _run_pycolmap_fake(gpu_usable=True, gpu_used=True, emit=said.append)
+    joined = " ".join(said).lower()
+    for word in ("extract", "match", "map"):
+        assert word in joined, said
+
+
 def test_pycolmap_failure_keeps_warnings():
     """A failed reconstruction still reports the warnings so far."""
     try:
@@ -731,7 +818,7 @@ def test_sfm_response_includes_detections():
     old_bin, old_recon = sfm.colmap_binary, sfm.reconstruct
     sfm.colmap_binary = lambda: "colmap"
 
-    def _fake_reconstruct(img_dir, workspace_dir, gpu_used):
+    def _fake_reconstruct(img_dir, workspace_dir, gpu_used, emit=None):
         model = os.path.join(workspace_dir, "sparse", "0")
         os.makedirs(model, exist_ok=True)
         for name, text in _MIN_TEXT_MODEL.items():
@@ -752,10 +839,11 @@ def test_sfm_response_includes_detections():
                    files={"zipfile": ("s.zip", zb.getvalue(),
                                        "application/zip")},
                    data={"detections": json.dumps(given)})
-        assert r.status_code == 200, (r.status_code, r.text)
-        body = r.json()
+        body = _sfm_final_data(r)
         assert "error" not in body, body
         assert body["detections"]["a.jpg"][0]["label"] == "door", body
+        assert body["thumbnails"]["a.jpg"].startswith("data:image/jpeg"), body
+        assert body["image_sizes"]["a.jpg"] == [64, 48], body
     finally:
         sfm.colmap_binary, sfm.reconstruct = old_bin, old_recon
 
@@ -814,6 +902,56 @@ def test_pycolmap_bumps_sift_features():
     assert opts.sift.max_num_features == sfm.SPARSE_SIFT_MAX_FEATURES, opts
 
 
+def test_sfm_streams_progress_log_then_result():
+    """POST /api/sfm streams log lines before the final result."""
+    import io
+    import json
+    import zipfile as _zip
+    from fastapi.testclient import TestClient  # noqa: E402
+    from PIL import Image  # noqa: E402
+    import server  # noqa: E402
+
+    old_bin = sfm.colmap_binary
+    sfm.colmap_binary = lambda: None  # force the pycolmap path
+    calls = {}
+    fake = _fake_pycolmap_with_gpu_check(True, calls)
+    old_pm = sys.modules.get("pycolmap")
+    sys.modules["pycolmap"] = fake
+    try:
+        c = TestClient(server.app, raise_server_exceptions=False)
+        zb = io.BytesIO()
+        with _zip.ZipFile(zb, "w") as zf:
+            for name in ("a.jpg", "b.jpg"):
+                buf = io.BytesIO()
+                Image.new("RGB", (64, 48), (10, 100, 200)).save(buf, "JPEG")
+                zf.writestr(name, buf.getvalue())
+        r = c.post("/api/sfm",
+                   files={"zipfile": ("s.zip", zb.getvalue(),
+                                       "application/zip")},
+                   data={"use_gpu": "0"})
+        assert r.status_code == 200, (r.status_code, r.text[:200])
+        assert "ndjson" in r.headers.get("content-type", ""), r.headers
+        logs, finals = [], []
+        for ln in r.text.splitlines():
+            if not ln.strip():
+                continue
+            msg = json.loads(ln)
+            if msg.get("type") == "log":
+                logs.append(msg["line"])
+            elif msg.get("type") == "result":
+                finals.append(msg["data"])
+        assert len(finals) == 1 and "error" not in finals[0], finals
+        joined = " ".join(logs).lower()
+        for word in ("extract", "match", "map"):
+            assert word in joined, logs
+    finally:
+        sfm.colmap_binary = old_bin
+        if old_pm is None:
+            del sys.modules["pycolmap"]
+        else:
+            sys.modules["pycolmap"] = old_pm
+
+
 def test_sfm_failure_response_keeps_backend_warnings():
     """POST /api/sfm failure replies carry the backend warnings."""
     import io
@@ -825,7 +963,7 @@ def test_sfm_failure_response_keeps_backend_warnings():
     old_bin, old_recon = sfm.colmap_binary, sfm.reconstruct
     sfm.colmap_binary = lambda: "colmap"
 
-    def _boom(img_dir, workspace_dir, gpu_used):
+    def _boom(img_dir, workspace_dir, gpu_used, emit=None):
         raise sfm.SfmError("pycolmap produced no model",
                            ["GPU fallback note"])
     sfm.reconstruct = _boom
@@ -840,8 +978,7 @@ def test_sfm_failure_response_keeps_backend_warnings():
         r = c.post("/api/sfm",
                    files={"zipfile": ("s.zip", zb.getvalue(),
                                        "application/zip")})
-        assert r.status_code == 200, (r.status_code, r.text)
-        body = r.json()
+        body = _sfm_final_data(r)
         assert "produced no model" in body["error"], body
         assert "GPU fallback note" in body["warnings"], body
     finally:

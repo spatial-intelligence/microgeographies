@@ -1063,6 +1063,58 @@
     list.appendChild(raw);
   }
 
+  // SAM image viewer: every set photo as a thumbnail with its boxes
+  // drawn over it, so the label stage can be checked by eye before
+  // the 3D cloud. Boxes are original-pixel; thumbnails are scaled
+  // by the server-sent sizes. Detection keys are matched by basename
+  // (explicit detections may carry subfolder paths).
+  function renderSfmSamImages(data) {
+    const wrap = $("sfmImgWrap"), grid = $("sfmImgGrid");
+    if (!wrap || !grid) return;
+    const thumbs = (data && data.thumbnails) || {};
+    const sizes = (data && data.image_sizes) || {};
+    const dets = (data && data.detections) || {};
+    const byBase = {};
+    Object.keys(dets).forEach((k) => {
+      const b = k.split("/").pop();
+      (byBase[b] = byBase[b] || []).push(...(dets[k] || []));
+    });
+    const names = [...new Set([...Object.keys(thumbs), ...Object.keys(byBase)])].sort();
+    grid.innerHTML = "";
+    if (!names.length) { wrap.hidden = true; return; }
+    wrap.hidden = false;
+    names.forEach((base) => {
+      const items = byBase[base] || [];
+      const cell = document.createElement("figure");
+      cell.className = "sam-cell";
+      const cv = document.createElement("canvas");
+      const cap = document.createElement("figcaption");
+      cap.textContent = `${base} — ${items.length} box(es)`;
+      cell.appendChild(cv);
+      cell.appendChild(cap);
+      grid.appendChild(cell);
+      const url = thumbs[base];
+      if (!url) return;
+      const img = new Image();
+      img.onload = () => {
+        cv.width = img.naturalWidth;
+        cv.height = img.naturalHeight;
+        const ctx = cv.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+        const size = sizes[base] || [img.naturalWidth, img.naturalHeight];
+        if (!size[0] || !size[1]) return;
+        const sx = cv.width / size[0], sy = cv.height / size[1];
+        paintBoxes(ctx, items.filter((d) => d && Array.isArray(d.box) && d.box.length >= 4).map((d) => ({
+          label: String(d.label || "object"),
+          score: typeof d.score === "number" ? d.score : null,
+          x1: d.box[0] * sx, y1: d.box[1] * sy,
+          x2: d.box[2] * sx, y2: d.box[3] * sy,
+        })), cv.width);
+      };
+      img.src = url;
+    });
+  }
+
   function sfmExportDownload() {
     if (!sfmData || !sfmLib) return;
     const pctEl = document.querySelector('input[name="expPct"]:checked');
@@ -1097,9 +1149,44 @@
     if (!zf) { sfmOut.textContent = "Pick a zip of photos above first."; return; }
     const concepts = setConcepts.value.split(",").map(s => s.trim()).filter(Boolean);
     const wantDense = $("sfmDense") && $("sfmDense").checked;
-    sfmOut.textContent = concepts.length
-      ? `Detecting labels (boxes only, no depth), then reconstructing 3D${wantDense ? " + dense stereo (slow)" : ""}…`
-      : `Reconstructing 3D unlabeled${wantDense ? " + dense stereo (slow)" : ""}…`;
+    // Progress UI: bar + scrolling log of the live server lines, so a
+    // long reconstruction reads as working, not crashed. Cleared here,
+    // filled from the stream below, hidden again when done.
+    const prog = $("sfmProg"), logBox = $("sfmLog");
+    const logLines = [];
+    const t0 = Date.now();
+    let stagePct = 5, stageLabel = concepts.length ? "Detecting labels" : "Reconstructing";
+    let lastPaint = 0;
+    const elapsed = () => `${Math.round((Date.now() - t0) / 1000)}s`;
+    const paintProgress = () => {
+      if (prog) { prog.hidden = false; prog.value = stagePct; }
+      sfmOut.textContent = `${stageLabel}… (${elapsed()} elapsed)`;
+      lastPaint = Date.now();
+    };
+    const pushLog = (line) => {
+      logLines.push(line);
+      if (logLines.length > 200) logLines.splice(0, logLines.length - 200);
+      if (logBox) {
+        logBox.hidden = false;
+        logBox.textContent = logLines.slice(-20).join("\n");
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+    };
+    // Stage words from the server markers and raw COLMAP lines.
+    const stageOf = (line) => {
+      const l = line.toLowerCase();
+      if (l.indexOf("undistort") >= 0) return [72, "Undistorting for dense stereo"];
+      if (l.indexOf("patch_match") >= 0 || l.indexOf("dense stereo matching") >= 0) return [80, "Dense stereo matching"];
+      if (l.indexOf("fus") >= 0) return [94, "Fusing depth maps"];
+      if (l.indexOf("extract") >= 0) return [12, "Extracting features"];
+      if (l.indexOf("match") >= 0) return [40, "Matching features"];
+      if (l.indexOf("map") >= 0) return [62, "Mapping cameras"];
+      return null;
+    };
+    if ($("sfmSamBox")) $("sfmSamBox").hidden = true;
+    if ($("sfmImgWrap")) $("sfmImgWrap").hidden = true;
+    sfmBtn.disabled = true;
+    paintProgress();
     try {
       const detectorUsed = (setDetector && setDetector.value) || "sam";
       const fd = new FormData();
@@ -1108,15 +1195,50 @@
       fd.append("detector", detectorUsed);
       fd.append("dense", wantDense ? "1" : "0");
       fd.append("use_gpu", ($("sfmCpu") && $("sfmCpu").checked) ? "0" : "1");
+      // The reply streams NDJSON: {type:"log"} lines while COLMAP
+      // runs, then one {type:"result"} with the payload (or error).
       const res = await fetch("/api/sfm", { method: "POST", body: fd });
-      const data = await res.json().catch(() => ({}));
       if (res.status === 503) {
-        sfmOut.textContent = "3D unavailable: the server has no COLMAP installed " +
-          "(install the COLMAP CLI or pycolmap to enable /api/sfm). " +
-          "Batch detection + map pins above keep working.";
+        let why = "";
+        try { why = (await res.json()).error || ""; } catch (e) { /* plain 503 */ }
+        sfmOut.textContent = "3D unavailable: " + (why ||
+          "the server has no COLMAP installed (install the COLMAP CLI or pycolmap to enable /api/sfm).") +
+          " Batch detection + map pins above keep working.";
         return;
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(data.error || "request failed").slice(0, 200)}`);
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}: request failed`);
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "", data = null;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (value) buf += dec.decode(value, { stream: true });
+        let idx, finished = false;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (!line) continue;
+          let msg = null;
+          try { msg = JSON.parse(line); } catch (e) { continue; }
+          if (!msg || msg.type === "ping") continue;
+          if (msg.type === "log") {
+            pushLog(String(msg.line));
+            const st = stageOf(String(msg.line));
+            if (st && (st[0] !== stagePct || st[1] !== stageLabel)) {
+              stagePct = st[0]; stageLabel = st[1];
+              paintProgress();
+            } else if (Date.now() - lastPaint > 5000) {
+              paintProgress(); // elapsed keeps ticking on quiet stretches
+            }
+          } else if (msg.type === "result") {
+            data = msg.data || {};
+            finished = true;
+            break;
+          }
+        }
+        if (finished || done) break;
+      }
+      if (!data) throw new Error("the 3D stream ended before any result arrived");
       if (data.error) throw new Error(data.error);
       try {
         sfmLib = sfmLib || await import("./sfm3d.js");
@@ -1158,8 +1280,12 @@
         (data.gpu_used ? " (GPU)." : ".") +
         (warns ? ` Note: ${warns}` : "");
       renderSfmSam(data, detectorUsed === "clip" ? "Local CLIP" : "Server SAM 3");
+      renderSfmSamImages(data);
     } catch (e) {
       sfmOut.textContent = `Error: ${e.message}`;
+    } finally {
+      sfmBtn.disabled = false;
+      if (prog) prog.hidden = true;
     }
   });
 

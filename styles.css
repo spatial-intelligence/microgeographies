@@ -70,6 +70,18 @@ body.wide .sfm-single { height: 560px; }
 .sam-box { margin: 8px 0; border: 1px solid #8886; border-radius: 4px; padding: 8px 12px; }
 .sam-box h3 { margin: 0 0 4px; font-size: 0.9rem; }
 .sam-box ul { margin: 4px 0; padding-left: 20px; font-size: 0.85rem; }
+/* SAM image viewer: annotated photo thumbnails in a grid. */
+#sfmImgWrap h3 { margin: 12px 0 4px; font-size: 0.9rem; }
+.sam-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin: 4px 0 8px; }
+.sam-cell { margin: 0; }
+.sam-cell canvas { width: 100%; display: block; border: 1px solid #8886; border-radius: 4px; }
+.sam-cell figcaption { font-size: 0.8rem; margin-top: 2px; }
+/* Reconstruction progress: bar plus a scrolling box of the live
+ * server log (last 20 lines), so long runs read as working. */
+#sfmProg { width: 100%; margin: 6px 0 0; }
+.sfm-log { max-height: 12em; overflow-y: auto; background: #101418; color: #cfe3d4;
+  font-size: 0.75rem; line-height: 1.35; padding: 8px 10px; border-radius: 4px;
+  white-space: pre-wrap; word-break: break-word; margin: 6px 0; }
 /* Point-size slider sits in the toolbar above the 3D view. */
 .tool-slider { display: inline-flex; gap: 8px; align-items: center; font-size: 0.85rem; }
 .tool-slider input[type="range"] { width: 140px; }

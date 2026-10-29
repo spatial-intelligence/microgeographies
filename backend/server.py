@@ -521,126 +521,175 @@ async def sfm(
         warnings.append("detections must map image filename to boxes: "
                         "label voting skipped")
 
-    try:
-        names_in = parse_concepts(concepts)
-        want_dense = str(dense or "").strip().lower() not in (
-            "", "0", "false", "no", "off")
-        with tempfile.TemporaryDirectory(prefix="sfm-") as tmp:
-            # Images live inside the workspace so patch_match_stereo
-            # can use the same directory (COLMAP workspace layout).
-            workspace = os.path.join(tmp, "workspace")
-            img_dir = os.path.join(workspace, "images")
-            os.makedirs(img_dir, exist_ok=True)
-            kept = {}  # basename -> PIL (depth-free label source)
-            for info in members[:MAX_BATCH_IMAGES]:
-                try:
-                    data = zf.read(info.filename)
-                    pil = geo.oriented_image(Image.open(io.BytesIO(data)).convert("RGB"))
-                except Exception:
-                    continue
-                base = os.path.basename(info.filename)
-                pil.save(os.path.join(img_dir, base))
-                kept[base] = pil
-            # Server-side labels without any depth pass: explicit
-            # detections win per image, concepts fill the rest.
-            if names_in:
-                auto, auto_errors = detect_concepts_no_depth(
-                    {k: v for k, v in kept.items() if k not in dets},
-                    names_in, detector=detector or "sam")
-                if auto:
-                    dets = {**auto, **dets}
-                    warnings.append(
-                        f"detected {len(auto)} image(s) for "
-                        f"{', '.join(names_in)} with {detector or 'sam'} "
-                        "(boxes only, no depth pass)")
-                else:
-                    why = ("; ".join(auto_errors[:3]) if auto_errors
-                           else "no boxes matched the concepts")
-                    warnings.append(
-                        f"concepts detection returned no boxes ({why}): "
-                        "cloud is unlabeled")
-            names = sorted(os.listdir(img_dir))
-            if len(names) < 2:
-                return {"error": "need at least 2 readable images "
-                                 "for reconstruction",
-                        "cameras": [], "gpu_used": gpu_used,
-                        "warnings": warnings}
-            model_dir, run_warnings = sfm_mod.reconstruct(
-                img_dir, workspace, gpu_used)
-            warnings.extend(run_warnings)
-            cameras, points, colors, parse_warnings = sfm_mod.parse_model(
-                model_dir)
-            warnings.extend(parse_warnings)
-            total = len(points)
-            if total == 0:
-                warnings.append("COLMAP returned an empty model (no 3D "
-                                "points): photos matched too weakly to "
-                                "triangulate — retry with more overlap "
-                                "and texture")
-            points, colors = sfm_mod.downsample(points, colors)
-            if total > len(points):
-                warnings.append(f"downsampled {total} points "
-                                f"to {len(points)} for the PLY export")
-            ply_text = sfm_mod.write_ply_ascii(points, colors)
-            point_labels = {str(k): v for k, v in
-                            sfm_mod.vote_point_labels(
-                                points, cameras, dets).items()}
-            registered = {c["image"] for c in cameras}
-            dense_ply, dense_count, dense_total = None, 0, 0
-            dense_labels = {}
-            if want_dense:
-                if sfm_mod.colmap_binary() is None:
-                    warnings.append("dense needs the COLMAP CLI: "
-                                    "pycolmap fallback gives sparse only")
-                else:
+    def job(emit):
+        """Slow pipeline: runs in a worker thread while _stream()
+        forwards log lines to the client (see below)."""
+        nonlocal dets  # explicit detections merge with auto ones below
+        try:
+            names_in = parse_concepts(concepts)
+            want_dense = str(dense or "").strip().lower() not in (
+                "", "0", "false", "no", "off")
+            with tempfile.TemporaryDirectory(prefix="sfm-") as tmp:
+                # Images live inside the workspace so patch_match_stereo
+                # can use the same directory (COLMAP workspace layout).
+                workspace = os.path.join(tmp, "workspace")
+                img_dir = os.path.join(workspace, "images")
+                os.makedirs(img_dir, exist_ok=True)
+                kept = {}  # basename -> PIL (depth-free label source)
+                for info in members[:MAX_BATCH_IMAGES]:
                     try:
-                        fused, dense_warnings = sfm_mod.run_dense_cli(
-                            sfm_mod.colmap_binary(), workspace, gpu_used)
-                        warnings.extend(dense_warnings)
-                        d_pts, d_cols = sfm_mod.read_ply_points(fused)
-                        dense_total = len(d_pts)
-                        if dense_total > sfm_mod.DENSE_PLY_CAP:
-                            stride = -(-dense_total //
-                                       sfm_mod.DENSE_PLY_CAP)
-                            d_pts = d_pts[::stride]
-                            d_cols = d_cols[::stride]
-                            warnings.append(
-                                f"downsampled {dense_total} dense points "
-                                f"to {len(d_pts)} for the reply")
-                        dense_count = len(d_pts)
-                        dense_ply = sfm_mod.write_ply_ascii(d_pts, d_cols)
-                        dense_labels = {
-                            str(k): v for k, v in
-                            sfm_mod.vote_point_labels_numpy(
-                                d_pts, cameras, dets).items()}
-                    except Exception as e:
-                        warnings.append(f"dense stereo failed ({e}): "
-                                        "sparse cloud still returned")
-            return {
-                "ply": ply_text,
-                "point_count": len(points),
-                "total_points": total,
-                # Per-image SAM/CLIP boxes that fed label voting
-                # ({image: [{label, box, score}]}), shown in the page's
-                # SAM stage box before the 3D view.
-                "detections": dets,
-                "cameras": cameras,
-                "point_labels": point_labels,
-                "registered": sorted(registered),
-                "unregistered": [n for n in names if n not in registered],
-                "dense_ply": dense_ply,
-                "dense_count": dense_count,
-                "dense_total": dense_total,
-                "dense_labels": dense_labels,
-                "gpu_used": gpu_used,
-                "warnings": warnings,
-            }
-    except Exception as e:  # reconstruction failure is data, never a 500
-        # The backend may have warned before failing (e.g. CPU fallback):
-        # those notes live on the error now that reconstruct() raised.
-        warnings.extend(getattr(e, "warnings", None) or [])
-        return {"error": f"sfm failed: {e}", "cameras": [],
-                "gpu_used": gpu_used, "warnings": warnings}
+                        data = zf.read(info.filename)
+                        pil = geo.oriented_image(Image.open(io.BytesIO(data)).convert("RGB"))
+                    except Exception:
+                        continue
+                    base = os.path.basename(info.filename)
+                    pil.save(os.path.join(img_dir, base))
+                    kept[base] = pil
+                # Server-side labels without any depth pass: explicit
+                # detections win per image, concepts fill the rest.
+                if names_in:
+                    auto, auto_errors = detect_concepts_no_depth(
+                        {k: v for k, v in kept.items() if k not in dets},
+                        names_in, detector=detector or "sam")
+                    if auto:
+                        dets = {**auto, **dets}
+                        warnings.append(
+                            f"detected {len(auto)} image(s) for "
+                            f"{', '.join(names_in)} with {detector or 'sam'} "
+                            "(boxes only, no depth pass)")
+                    else:
+                        why = ("; ".join(auto_errors[:3]) if auto_errors
+                               else "no boxes matched the concepts")
+                        warnings.append(
+                            f"concepts detection returned no boxes ({why}): "
+                            "cloud is unlabeled")
+                names = sorted(os.listdir(img_dir))
+                if len(names) < 2:
+                    return {"error": "need at least 2 readable images "
+                                     "for reconstruction",
+                            "cameras": [], "gpu_used": gpu_used,
+                            "warnings": warnings}
+                model_dir, run_warnings = sfm_mod.reconstruct(
+                    img_dir, workspace, gpu_used, emit)
+                warnings.extend(run_warnings)
+                cameras, points, colors, parse_warnings = sfm_mod.parse_model(
+                    model_dir)
+                warnings.extend(parse_warnings)
+                total = len(points)
+                if total == 0:
+                    warnings.append("COLMAP returned an empty model (no 3D "
+                                    "points): photos matched too weakly to "
+                                    "triangulate — retry with more overlap "
+                                    "and texture")
+                points, colors = sfm_mod.downsample(points, colors)
+                if total > len(points):
+                    warnings.append(f"downsampled {total} points "
+                                    f"to {len(points)} for the PLY export")
+                ply_text = sfm_mod.write_ply_ascii(points, colors)
+                point_labels = {str(k): v for k, v in
+                                sfm_mod.vote_point_labels(
+                                    points, cameras, dets).items()}
+                registered = {c["image"] for c in cameras}
+                dense_ply, dense_count, dense_total = None, 0, 0
+                dense_labels = {}
+                if want_dense:
+                    if sfm_mod.colmap_binary() is None:
+                        warnings.append("dense needs the COLMAP CLI: "
+                                        "pycolmap fallback gives sparse only")
+                    else:
+                        try:
+                            fused, dense_warnings = sfm_mod.run_dense_cli(
+                                sfm_mod.colmap_binary(), workspace, gpu_used,
+                                emit)
+                            warnings.extend(dense_warnings)
+                            d_pts, d_cols = sfm_mod.read_ply_points(fused)
+                            dense_total = len(d_pts)
+                            if dense_total > sfm_mod.DENSE_PLY_CAP:
+                                stride = -(-dense_total //
+                                           sfm_mod.DENSE_PLY_CAP)
+                                d_pts = d_pts[::stride]
+                                d_cols = d_cols[::stride]
+                                warnings.append(
+                                    f"downsampled {dense_total} dense points "
+                                    f"to {len(d_pts)} for the reply")
+                            dense_count = len(d_pts)
+                            dense_ply = sfm_mod.write_ply_ascii(d_pts, d_cols)
+                            dense_labels = {
+                                str(k): v for k, v in
+                                sfm_mod.vote_point_labels_numpy(
+                                    d_pts, cameras, dets).items()}
+                        except Exception as e:
+                            warnings.append(f"dense stereo failed ({e}): "
+                                            "sparse cloud still returned")
+                return {
+                    "ply": ply_text,
+                    "point_count": len(points),
+                    "total_points": total,
+                    # Per-image SAM/CLIP boxes that fed label voting
+                    # ({image: [{label, box, score}]}), shown in the page's
+                    # SAM stage box before the 3D view.
+                    "detections": dets,
+                    # Downscaled per-photo JPEGs + original sizes so the page
+                    # can draw the boxes over the photos (SAM image viewer).
+                    "thumbnails": {base: thumbnail_data_url(pil)
+                                   for base, pil in kept.items()},
+                    "image_sizes": {base: [pil.width, pil.height]
+                                    for base, pil in kept.items()},
+                    "cameras": cameras,
+                    "point_labels": point_labels,
+                    "registered": sorted(registered),
+                    "unregistered": [n for n in names if n not in registered],
+                    "dense_ply": dense_ply,
+                    "dense_count": dense_count,
+                    "dense_total": dense_total,
+                    "dense_labels": dense_labels,
+                    "gpu_used": gpu_used,
+                    "warnings": warnings,
+                }
+        except Exception as e:  # reconstruction failure is data, never a 500
+            # The backend may have warned before failing (e.g. CPU fallback):
+            # those notes live on the error now that reconstruct() raised.
+            warnings.extend(getattr(e, "warnings", None) or [])
+            return {"error": f"sfm failed: {e}", "cameras": [],
+                    "gpu_used": gpu_used, "warnings": warnings}
+
+    from queue import Queue, Empty
+    import threading
+    from fastapi.responses import StreamingResponse
+    log_queue: Queue = Queue()
+
+    def _worker():
+        try:
+            log_queue.put({"type": "result", "data": job(log_queue.put)})
+        except Exception as e:  # never leave the stream hanging
+            log_queue.put({"type": "result", "data": {
+                "error": f"sfm failed: {e}", "cameras": [],
+                "gpu_used": gpu_used, "warnings": warnings}})
+
+    def _stream():
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        while True:
+            try:
+                message = log_queue.get(timeout=15)
+            except Empty:
+                if not thread.is_alive():
+                    yield (json.dumps({"type": "result", "data": {
+                        "error": "sfm worker stopped unexpectedly",
+                        "cameras": [], "gpu_used": gpu_used,
+                        "warnings": warnings}}) + "\n")
+                    break
+                yield '{"type": "ping"}\n'
+                continue
+            if isinstance(message, dict):
+                yield json.dumps(message) + "\n"
+                if message.get("type") == "result":
+                    break
+            else:
+                yield json.dumps({"type": "log", "line": str(message)}) + "\n"
+        thread.join(timeout=120)
+
+    return StreamingResponse(_stream(), media_type="application/x-ndjson")
 
 
 # Single-origin serving: the page and the API share one host:port so the

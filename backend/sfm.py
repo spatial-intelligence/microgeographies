@@ -392,12 +392,52 @@ def vote_point_labels(points, cameras, detections):
 # COLMAP execution (CLI preferred, pycolmap fallback)
 # --------------------------------------------------------------------------
 
-def _run(cmd, warnings):
+def _run(cmd, warnings, emit=None):
+    """Run a COLMAP tool; raise RuntimeError with its log tail on failure.
+
+    Without ``emit`` the tool runs silently (captured output), as before.
+    With ``emit`` (a ``str -> None`` sink) stdout+stderr stream there line
+    by line as they arrive — the /api/sfm progress log — while the tail
+    is still kept for the failure message. A tool running past 1800 s is
+    killed in both modes.
+    """
+    if emit is None:
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True,
+                           errors="replace", timeout=1800)
+        except subprocess.CalledProcessError as e:
+            tail = (e.stderr or e.stdout or "")[-2000:]
+            raise RuntimeError(f"{' '.join(cmd[:2])} failed: {tail}")
+        return
+    import threading
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True,
+                            errors="replace", bufsize=1)
+    lines = []
+
+    def _pump():
+        try:
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                lines.append(line)
+                try:
+                    emit(line)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    pump = threading.Thread(target=_pump, daemon=True)
+    pump.start()
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True,
-                       errors="replace", timeout=1800)
-    except subprocess.CalledProcessError as e:
-        tail = (e.stderr or e.stdout or "")[-2000:]
+        rc = proc.wait(timeout=1800)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise RuntimeError(f"{' '.join(cmd[:2])} timed out after 1800 s")
+    finally:
+        pump.join(timeout=30)
+    if rc != 0:
+        tail = "\n".join(lines)[-2000:]
         raise RuntimeError(f"{' '.join(cmd[:2])} failed: {tail}")
 
 
@@ -493,9 +533,11 @@ def _sift_gpu_flags(binary, gpu_used):
             ["--SiftMatching.use_gpu", flag])
 
 
-def run_colmap_cli(images_dir, workspace_dir, gpu_used):
+def run_colmap_cli(images_dir, workspace_dir, gpu_used, emit=None):
     """Feature extraction + exhaustive matching + mapping. Returns the
-    best sparse model dir. Raises RuntimeError on failure."""
+    best sparse model dir. Raises RuntimeError on failure. With
+    ``emit`` (a ``str -> None`` sink) each tool's log lines stream
+    there as they arrive (the /api/sfm progress log)."""
     warnings = []
     binary = colmap_binary()
     if binary is None:
@@ -510,13 +552,13 @@ def run_colmap_cli(images_dir, workspace_dir, gpu_used):
     try:
         _run([binary, "feature_extractor",
               "--database_path", db_path, "--image_path", images_dir,
-              *extract_gpu], warnings)
+              *extract_gpu], warnings, emit)
         _run([binary, "exhaustive_matcher",
               "--database_path", db_path,
-              *match_gpu], warnings)
+              *match_gpu], warnings, emit)
         _run([binary, "mapper",
               "--database_path", db_path, "--image_path", images_dir,
-              "--output_path", sparse_dir], warnings)
+              "--output_path", sparse_dir], warnings, emit)
         model_dir = _pick_model_dir(sparse_dir)
         if model_dir is None:
             raise RuntimeError(
@@ -577,8 +619,21 @@ def _validated_extraction_options(pycolmap, gpu_used, warnings):
     return fe_opts, bool(getattr(fe_opts, "use_gpu", gpu_used))
 
 
-def run_colmap_pycolmap(images_dir, workspace_dir, gpu_used):
-    """Best-effort pycolmap pipeline when the CLI binary is missing."""
+def _note(emit, line):
+    """Send one stage line to the progress log, never raising."""
+    if emit is None:
+        return
+    try:
+        emit(line)
+    except Exception:
+        pass
+
+
+def run_colmap_pycolmap(images_dir, workspace_dir, gpu_used, emit=None):
+    """Best-effort pycolmap pipeline when the CLI binary is missing.
+
+    pycolmap logs to its own files, not our pipes, so with ``emit``
+    the stages announce themselves with marker lines instead."""
     try:
         import pycolmap
     except Exception as e:
@@ -598,6 +653,8 @@ def run_colmap_pycolmap(images_dir, workspace_dir, gpu_used):
     # Newer pycolmap speaks extraction_options + device; older ones
     # take sift_options. Prefer the new spelling when present.
     try:
+        _note(emit, "extracting SIFT features "
+                    f"({'GPU' if gpu_used else 'CPU'})…")
         if hasattr(pycolmap, "FeatureExtractionOptions"):
             fe_opts, gpu_effective = _validated_extraction_options(
                 pycolmap, gpu_used, warnings)
@@ -620,7 +677,9 @@ def run_colmap_pycolmap(images_dir, workspace_dir, gpu_used):
             kwargs = ({"sift_options": sift_opts}
                       if sift_opts is not None else {})
             extract(db_path, images_dir, **kwargs)
+        _note(emit, "exhaustive matching…")
         match(db_path)
+        _note(emit, "incremental mapping…")
         maps = mapping(db_path, images_dir, sparse_dir)
         if not maps:
             raise RuntimeError("pycolmap produced no model "
@@ -636,11 +695,11 @@ def run_colmap_pycolmap(images_dir, workspace_dir, gpu_used):
     return model_dir, warnings
 
 
-def reconstruct(images_dir, workspace_dir, gpu_used):
+def reconstruct(images_dir, workspace_dir, gpu_used, emit=None):
     """CLI preferred; pycolmap when no binary. Returns (model_dir, warnings)."""
     if colmap_binary() is not None:
-        return run_colmap_cli(images_dir, workspace_dir, gpu_used)
-    return run_colmap_pycolmap(images_dir, workspace_dir, gpu_used)
+        return run_colmap_cli(images_dir, workspace_dir, gpu_used, emit)
+    return run_colmap_pycolmap(images_dir, workspace_dir, gpu_used, emit)
 
 
 DENSE_PLY_CAP = 250000  # max dense points returned inline
@@ -669,25 +728,44 @@ def _dense_gpu_flags(binary, gpu_used):
     return args
 
 
-def run_dense_cli(binary, workspace_dir, gpu_used):
-    """patch_match_stereo + stereo_fusion. Returns (fused_ply, warnings).
+def run_dense_cli(binary, workspace_dir, gpu_used, emit=None):
+    """Undistort + patch_match_stereo + stereo_fusion. Returns (fused_ply, warnings).
 
     Expects workspace/images + workspace/sparse (COLMAP workspace
-    layout). Raises RuntimeError with the tool's log tail on failure.
+    layout). patch_match_stereo cannot read the mapper output directly:
+    it needs the undistorted MVS workspace image_undistorter produces
+    (images + sparse model + stereo dirs), so that runs first into
+    workspace/dense. Raises RuntimeError with the tool's log tail on
+    failure.
     """
     warnings = []
     if not gpu_used:
         warnings.append("dense stereo runs on CPU (slow on large photos)")
+    sparse_dir = os.path.join(workspace_dir, "sparse")
+    model_dir = _pick_model_dir(sparse_dir)
+    if model_dir is None:
+        raise RuntimeError("no sparse model to densify in "
+                           f"{sparse_dir} (contains: "
+                           f"{_sparse_listing(sparse_dir)})")
+    dense_dir = os.path.join(workspace_dir, "dense")
+    _note(emit, "undistorting images for dense stereo…")
+    _run([binary, "image_undistorter",
+          "--image_path", os.path.join(workspace_dir, "images"),
+          "--input_path", model_dir,
+          "--output_path", dense_dir,
+          "--output_type", "COLMAP"], warnings, emit)
+    _note(emit, "dense stereo matching (slow)…")
     _run([binary, "patch_match_stereo",
-          "--workspace_path", workspace_dir,
+          "--workspace_path", dense_dir,
           "--workspace_format", "COLMAP",
-          *_dense_gpu_flags(binary, gpu_used)], warnings)
+          *_dense_gpu_flags(binary, gpu_used)], warnings, emit)
     fused = os.path.join(workspace_dir, "fused.ply")
+    _note(emit, "fusing dense depth maps…")
     _run([binary, "stereo_fusion",
-          "--workspace_path", workspace_dir,
+          "--workspace_path", dense_dir,
           "--workspace_format", "COLMAP",
           "--input_type", "photometric",
-          "--output_path", fused], warnings)
+          "--output_path", fused], warnings, emit)
     if not os.path.isfile(fused):
         raise RuntimeError("stereo_fusion left no fused.ply "
                            f"(workspace: {_sparse_listing(workspace_dir)})")
