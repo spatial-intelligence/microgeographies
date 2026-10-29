@@ -46,6 +46,68 @@ def test_project_outside_frame_is_none():
                              cam["model"], cam["params"], 640, 480) is None
 
 
+def test_simple_radial_zero_equals_pinhole():
+    a = sfm.project_point([1.0, 2.0, 10.0], [1, 0, 0, 0], [0, 0, 0],
+                          "SIMPLE_RADIAL", [500.0, 320.0, 240.0, 0.0],
+                          640, 480)
+    b = sfm.project_point([1.0, 2.0, 10.0], [1, 0, 0, 0], [0, 0, 0],
+                          "SIMPLE_PINHOLE", [500.0, 320.0, 240.0],
+                          640, 480)
+    assert a is not None and b is not None
+    assert abs(a[0] - b[0]) < 1e-9 and abs(a[1] - b[1]) < 1e-9
+
+
+def test_simple_radial_distorts():
+    # xn=0.1, r2=0.01, radial=1+0.1*0.01=1.001 -> u=500*0.1001+320
+    p = sfm.project_point([1.0, 0.0, 10.0], [1, 0, 0, 0], [0, 0, 0],
+                          "SIMPLE_RADIAL", [500.0, 320.0, 240.0, 0.1],
+                          640, 480)
+    assert p is not None and abs(p[0] - 370.05) < 1e-6, p
+    assert abs(p[1] - 240.0) < 1e-9, p
+
+
+def test_opencv_zero_equals_pinhole():
+    a = sfm.project_point([1.0, 2.0, 10.0], [1, 0, 0, 0], [0, 0, 0],
+                          "OPENCV", [500.0, 500.0, 320.0, 240.0,
+                                     0, 0, 0, 0], 640, 480)
+    b = sfm.project_point([1.0, 2.0, 10.0], [1, 0, 0, 0], [0, 0, 0],
+                          "PINHOLE", [500.0, 500.0, 320.0, 240.0],
+                          640, 480)
+    assert a is not None and b is not None
+    assert abs(a[0] - b[0]) < 1e-9 and abs(a[1] - b[1]) < 1e-9
+
+
+def test_opencv_tangential():
+    # p1=0.01 shifts y: yd=0.01*(0.01)+0 -> v=500*0.0001+240
+    p = sfm.project_point([1.0, 0.0, 10.0], [1, 0, 0, 0], [0, 0, 0],
+                          "OPENCV", [500.0, 500.0, 320.0, 240.0,
+                                     0, 0, 0.01, 0], 640, 480)
+    assert p is not None and abs(p[0] - 370.0) < 1e-6, p
+    assert abs(p[1] - 240.05) < 1e-6, p
+
+
+def test_unsupported_model_raises():
+    try:
+        sfm.project_point([0, 0, 5], [1, 0, 0, 0], [0, 0, 0],
+                          "SPHERICAL", [500.0, 320.0, 240.0], 640, 480)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "SPHERICAL" in str(e)
+
+
+def test_parse_keeps_radial_model():
+    tmp = tempfile.mkdtemp(prefix="sfm-radial-")
+    with open(os.path.join(tmp, "cameras.txt"), "w") as fh:
+        fh.write("1 SIMPLE_RADIAL 640 480 500 320 240 0.05\n")
+    with open(os.path.join(tmp, "images.txt"), "w") as fh:
+        fh.write("1 1 0 0 0 0 0 0 1 a.jpg\n\n")
+    with open(os.path.join(tmp, "points3D.txt"), "w") as fh:
+        fh.write("")
+    cameras, points, colors, warnings = sfm.parse_model(tmp)
+    assert [c["image"] for c in cameras] == ["a.jpg"], (cameras, warnings)
+    assert not warnings, warnings
+
+
 def test_pinhole_model():
     cam = _cam(model="PINHOLE", params=(500.0, 600.0, 320.0, 240.0))
     p = sfm.project_point([0.0, 0.0, 5.0], cam["qvec"], cam["tvec"],
@@ -103,7 +165,7 @@ def test_parse_text_model():
     with open(os.path.join(tmp, "cameras.txt"), "w") as fh:
         fh.write("# Camera list\n1 SIMPLE_PINHOLE 640 480 500 320 240\n"
                  "2 PINHOLE 640 480 500 600 320 240\n"
-                 "3 OPENCV 640 480 500 600 320 240 0 0 0 0\n")
+                 "3 SPHERICAL 640 480 500 320 240\n")
     with open(os.path.join(tmp, "images.txt"), "w") as fh:
         fh.write("1 1 0 0 0 0 0 0 1 a.jpg\n\n"
                  "2 1 0 0 0 0 0 0 2 b.jpg\n\n"
@@ -112,7 +174,7 @@ def test_parse_text_model():
         fh.write("7 1.0 2.0 3.0 255 0 0 0.5 1 0\n")
     cameras, points, colors, warnings = sfm.parse_model(tmp)
     assert {c["image"] for c in cameras} == {"a.jpg", "b.jpg"}, cameras
-    assert any("OPENCV" in w for w in warnings), warnings
+    assert any("SPHERICAL" in w for w in warnings), warnings
     assert points == [[1.0, 2.0, 3.0]] and colors == [[255, 0, 0]]
     pin = next(c for c in cameras if c["image"] == "b.jpg")
     assert pin["params"] == [500.0, 600.0, 320.0, 240.0]
@@ -426,6 +488,122 @@ def test_pycolmap_prefers_new_api():
     assert any("pycolmap" in w for w in warnings), warnings
 
 
+def test_sift_gpu_flags_both_spellings():
+    tmp = tempfile.mkdtemp(prefix="sfm-flags-")
+    new = os.path.join(tmp, "colmap-new")
+    with open(new, "w") as fh:
+        fh.write("#!/bin/sh\necho '--FeatureExtraction.use_gpu arg (=1)'\n")
+    old = os.path.join(tmp, "colmap-old")
+    with open(old, "w") as fh:
+        fh.write("#!/bin/sh\necho 'no gpu flags here'\n")
+    err = os.path.join(tmp, "colmap-err")
+    with open(err, "w") as fh:
+        fh.write("#!/bin/sh\necho '--FeatureExtraction.use_gpu arg (=1)' >&2\n")
+    os.chmod(new, 0o755)
+    os.chmod(old, 0o755)
+    os.chmod(err, 0o755)
+    ex, ma = sfm._sift_gpu_flags(new, True)
+    assert ex == ["--FeatureExtraction.use_gpu", "1",
+                  "--FeatureExtraction.gpu_index", "0"], ex
+    assert ma == ["--FeatureMatching.use_gpu", "1",
+                  "--FeatureMatching.gpu_index", "0"], ma
+    ex, ma = sfm._sift_gpu_flags(new, False)
+    assert ex == ["--FeatureExtraction.use_gpu", "0"], ex
+    ex, ma = sfm._sift_gpu_flags(old, True)
+    assert ex == ["--SiftExtraction.use_gpu", "1"], ex
+    assert ma == ["--SiftMatching.use_gpu", "1"], ma
+    ex, ma = sfm._sift_gpu_flags(err, True)  # --help on stderr (COLMAP 4.x)
+    assert ex[0] == "--FeatureExtraction.use_gpu", ex
+    ex, ma = sfm._sift_gpu_flags(os.path.join(tmp, "missing"), True)
+    assert ex == ["--SiftExtraction.use_gpu", "1"], ex
+
+
+def _min_cams():
+    return [{"image": "a.jpg", "qvec": [1.0, 0.0, 0.0, 0.0],
+             "tvec": [0.0, 0.0, 0.0], "width": 640, "height": 480,
+             "model": "SIMPLE_PINHOLE", "params": [500.0, 320.0, 240.0]}]
+
+
+def test_read_ply_binary():
+    import struct
+    tmp = tempfile.mkdtemp(prefix="sfm-plybin-")
+    path = os.path.join(tmp, "fused.ply")
+    header = ("ply\nformat binary_little_endian 1.0\n"
+              "element vertex 2\n"
+              "property float x\nproperty float y\nproperty float z\n"
+              "property float nx\nproperty float ny\nproperty float nz\n"
+              "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+              "end_header\n").encode("ascii")
+    rows = struct.pack("<ffffffBBB", 1.0, 2.0, 3.0, 0, 0, 1,
+                       255, 0, 128)
+    rows += struct.pack("<ffffffBBB", 4.0, 5.0, 6.0, 0, 1, 0, 1, 2, 3)
+    with open(path, "wb") as fh:
+        fh.write(header + rows)
+    pts, cols = sfm.read_ply_points(path)
+    assert pts == [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], pts
+    assert cols == [[255, 0, 128], [1, 2, 3]], cols
+
+
+def test_read_ply_ascii_file():
+    tmp = tempfile.mkdtemp(prefix="sfm-plyascii-")
+    path = os.path.join(tmp, "a.ply")
+    with open(path, "w") as fh:
+        fh.write(sfm.write_ply_ascii([[1.0, 2.0, 3.0]], [[10, 20, 30]]))
+    pts, cols = sfm.read_ply_points(path)
+    assert pts == [[1.0, 2.0, 3.0]] and cols == [[10, 20, 30]]
+
+
+def test_numpy_vote_matches_pure():
+    cams = _min_cams()
+    points = [[0.0, 0.0, 5.0], [50.0, 0.0, 5.0], [0.0, 0.0, -5.0]]
+    dets = {"a.jpg": [{"label": "door", "box": [300, 220, 340, 260],
+                       "score": 0.9},
+                      {"label": "bin", "box": [0, 0, 640, 480],
+                       "score": 0.1}]}
+    pure = sfm.vote_point_labels(points, cams, dets)
+    fast = sfm.vote_point_labels_numpy(points, cams, dets)
+    assert fast == pure, (fast, pure)
+    assert fast[0]["label"] == "door", fast
+    assert 1 not in fast and 2 not in fast, fast  # outside frame / behind
+
+
+def test_dense_gpu_flags_probe():
+    tmp = tempfile.mkdtemp(prefix="sfm-denseflags-")
+    both = os.path.join(tmp, "colmap-both")
+    with open(both, "w") as fh:
+        fh.write("#!/bin/sh\necho '--PatchMatchStereo.use_gpu arg (=1)'\n"
+                 "echo '--PatchMatchStereo.gpu_index arg (=-1)'\n")
+    idx = os.path.join(tmp, "colmap-idx")
+    with open(idx, "w") as fh:
+        fh.write("#!/bin/sh\necho '--PatchMatchStereo.gpu_index arg (=-1)' >&2\n")
+    os.chmod(both, 0o755)
+    os.chmod(idx, 0o755)
+    assert sfm._dense_gpu_flags(both, True) == [
+        "--PatchMatchStereo.use_gpu", "1",
+        "--PatchMatchStereo.gpu_index", "0"]
+    assert sfm._dense_gpu_flags(both, False) == [
+        "--PatchMatchStereo.use_gpu", "0"]
+    assert sfm._dense_gpu_flags(idx, False) == [
+        "--PatchMatchStereo.gpu_index", "-1"]
+    assert sfm._dense_gpu_flags(idx, True) == [
+        "--PatchMatchStereo.gpu_index", "0"]
+
+
+def test_run_dense_cli_failure():
+    old = sfm._run
+    def _boom(cmd, warnings):
+        raise RuntimeError("colmap patch_match_stereo failed: no GPU")
+    sfm._run = _boom
+    try:
+        try:
+            sfm.run_dense_cli("colmap", "/ws", False)
+            raise AssertionError("expected RuntimeError")
+        except RuntimeError as e:
+            assert "patch_match" in str(e) and "no GPU" in str(e), e
+    finally:
+        sfm._run = old
+
+
 def test_sfm_bad_zip_never_500():
     from fastapi.testclient import TestClient  # noqa: E402
     import server  # noqa: E402
@@ -435,6 +613,239 @@ def test_sfm_bad_zip_never_500():
                                    "application/zip")})
     assert r.status_code == 200, (r.status_code, r.text)
     assert "error" in r.json(), r.text
+
+
+def _fake_pycolmap_with_gpu_check(gpu_usable, calls, maps_empty=False):
+    """Fake pycolmap 4.x module emulating its extraction-options check.
+
+    gpu_usable=False mimics a CPU-only wheel on a machine with a GPU:
+    check() fails exactly when use_gpu is set, and extract() raises the
+    same "Check failed: extraction_options.Check()" ValueError the real
+    binding raises (backend/sfm.py must fall back to CPU instead).
+    """
+    import sys
+    import types
+    fake = types.ModuleType("pycolmap")
+
+    class _Device:
+        auto, cpu, cuda = "auto", "cpu", "cuda"
+    fake.Device = _Device
+
+    class _FE:
+        def __init__(self):
+            self.use_gpu = False
+
+        def check(self):
+            return gpu_usable or not self.use_gpu
+    fake.FeatureExtractionOptions = _FE
+
+    def _extract(db, imgs, **kw):
+        opts = kw.get("extraction_options")
+        if opts is not None and not opts.check():
+            raise ValueError("[extract_features.cc:35] Check failed: "
+                             "extraction_options.Check()")
+        calls["extract"] = kw
+
+    def _match(db):
+        calls["match"] = True
+
+    class _Recon:
+        points3D = [1, 2, 3]
+
+        def write_text(self, path):
+            calls["wrote"] = path
+            os.makedirs(path, exist_ok=True)
+            for name, text in _MIN_TEXT_MODEL.items():
+                _write(os.path.join(path, name), text)
+
+    def _mapping(db, imgs, out):
+        calls["mapping"] = True
+        return {} if maps_empty else {"0": _Recon()}
+    fake.extract_features, fake.match_exhaustive = _extract, _match
+    fake.incremental_mapping = _mapping
+    return fake
+
+
+def _run_pycolmap_fake(gpu_usable, gpu_used, maps_empty=False):
+    import sys
+    calls = {}
+    fake = _fake_pycolmap_with_gpu_check(gpu_usable, calls,
+                                         maps_empty=maps_empty)
+    old = sys.modules.get("pycolmap")
+    sys.modules["pycolmap"] = fake
+    ws = tempfile.mkdtemp(prefix="sfm-gpufallback-")
+    try:
+        model_dir, warnings = sfm.run_colmap_pycolmap("/imgs", ws,
+                                                      gpu_used)
+    finally:
+        if old is None:
+            del sys.modules["pycolmap"]
+        else:
+            sys.modules["pycolmap"] = old
+    return calls, model_dir, warnings
+
+
+def test_pycolmap_falls_back_to_cpu_when_gpu_unusable():
+    """CPU-only pycolmap wheel + visible GPU must degrade, not 500."""
+    calls, model_dir, warnings = _run_pycolmap_fake(gpu_usable=False,
+                                                    gpu_used=True)
+    opts = calls["extract"]["extraction_options"]
+    assert opts.use_gpu is False, opts
+    assert calls["extract"].get("device") == "cpu", calls
+    assert any("cpu" in w.lower() for w in warnings), warnings
+    assert os.path.isfile(os.path.join(model_dir, "cameras.txt"))
+
+
+def test_pycolmap_keeps_gpu_when_usable():
+    """A CUDA-capable pycolmap must still get use_gpu + cuda device."""
+    calls, _, warnings = _run_pycolmap_fake(gpu_usable=True,
+                                            gpu_used=True)
+    opts = calls["extract"]["extraction_options"]
+    assert opts.use_gpu is True, opts
+    assert calls["extract"].get("device") == "cuda", calls
+    assert not any("falling back" in w for w in warnings), warnings
+
+
+def test_pycolmap_failure_keeps_warnings():
+    """A failed reconstruction still reports the warnings so far."""
+    try:
+        _run_pycolmap_fake(gpu_usable=False, gpu_used=True,
+                           maps_empty=True)
+        raise AssertionError("expected SfmError")
+    except RuntimeError as e:
+        assert "no model" in str(e), e
+        assert isinstance(e, sfm.SfmError), type(e)
+        assert any("falling back" in w for w in e.warnings), e.warnings
+        assert any("pycolmap fallback" in w for w in e.warnings), e.warnings
+
+
+def test_sfm_response_includes_detections():
+    """POST /api/sfm echoes the per-image SAM boxes for the SAM box."""
+    import io
+    import json
+    import zipfile as _zip
+    from fastapi.testclient import TestClient  # noqa: E402
+    from PIL import Image  # noqa: E402
+    import server  # noqa: E402
+
+    old_bin, old_recon = sfm.colmap_binary, sfm.reconstruct
+    sfm.colmap_binary = lambda: "colmap"
+
+    def _fake_reconstruct(img_dir, workspace_dir, gpu_used):
+        model = os.path.join(workspace_dir, "sparse", "0")
+        os.makedirs(model, exist_ok=True)
+        for name, text in _MIN_TEXT_MODEL.items():
+            _write(os.path.join(model, name), text)
+        return model, []
+    sfm.reconstruct = _fake_reconstruct
+    try:
+        c = TestClient(server.app, raise_server_exceptions=False)
+        zb = io.BytesIO()
+        with _zip.ZipFile(zb, "w") as zf:
+            for name in ("a.jpg", "b.jpg"):
+                buf = io.BytesIO()
+                Image.new("RGB", (64, 48), (10, 100, 200)).save(buf, "JPEG")
+                zf.writestr(name, buf.getvalue())
+        given = {"a.jpg": [{"label": "door", "box": [0, 0, 10, 10],
+                            "score": 0.9}]}
+        r = c.post("/api/sfm",
+                   files={"zipfile": ("s.zip", zb.getvalue(),
+                                       "application/zip")},
+                   data={"detections": json.dumps(given)})
+        assert r.status_code == 200, (r.status_code, r.text)
+        body = r.json()
+        assert "error" not in body, body
+        assert body["detections"]["a.jpg"][0]["label"] == "door", body
+    finally:
+        sfm.colmap_binary, sfm.reconstruct = old_bin, old_recon
+
+
+def test_pycolmap_bumps_sift_features():
+    """pycolmap extraction asks for a denser sparse cloud (guarded)."""
+    import sys
+    import types
+    calls = {}
+    fake = types.ModuleType("pycolmap")
+
+    class _Device:
+        auto, cpu, cuda = "auto", "cpu", "cuda"
+    fake.Device = _Device
+
+    class _Sift:
+        max_num_features = 8192
+    class _FE:
+        def __init__(self):
+            self.use_gpu = False
+            self.sift = _Sift()
+
+        def check(self):
+            return True
+    fake.FeatureExtractionOptions = _FE
+
+    def _extract(db, imgs, **kw):
+        calls["extract"] = kw
+    def _match(db):
+        pass
+
+    class _Recon:
+        points3D = [1]
+
+        def write_text(self, path):
+            calls["wrote"] = path
+            os.makedirs(path, exist_ok=True)
+            for name, text in _MIN_TEXT_MODEL.items():
+                _write(os.path.join(path, name), text)
+
+    def _mapping(db, imgs, out):
+        return {"0": _Recon()}
+    fake.extract_features, fake.match_exhaustive = _extract, _match
+    fake.incremental_mapping = _mapping
+    old = sys.modules.get("pycolmap")
+    sys.modules["pycolmap"] = fake
+    ws = tempfile.mkdtemp(prefix="sfm-siftbump-")
+    try:
+        sfm.run_colmap_pycolmap("/imgs", ws, False)
+    finally:
+        if old is None:
+            del sys.modules["pycolmap"]
+        else:
+            sys.modules["pycolmap"] = old
+    opts = calls["extract"]["extraction_options"]
+    assert opts.sift.max_num_features == sfm.SPARSE_SIFT_MAX_FEATURES, opts
+
+
+def test_sfm_failure_response_keeps_backend_warnings():
+    """POST /api/sfm failure replies carry the backend warnings."""
+    import io
+    import zipfile as _zip
+    from fastapi.testclient import TestClient  # noqa: E402
+    from PIL import Image  # noqa: E402
+    import server  # noqa: E402
+
+    old_bin, old_recon = sfm.colmap_binary, sfm.reconstruct
+    sfm.colmap_binary = lambda: "colmap"
+
+    def _boom(img_dir, workspace_dir, gpu_used):
+        raise sfm.SfmError("pycolmap produced no model",
+                           ["GPU fallback note"])
+    sfm.reconstruct = _boom
+    try:
+        c = TestClient(server.app, raise_server_exceptions=False)
+        zb = io.BytesIO()
+        with _zip.ZipFile(zb, "w") as zf:
+            for name in ("a.jpg", "b.jpg"):
+                buf = io.BytesIO()
+                Image.new("RGB", (64, 48), (10, 100, 200)).save(buf, "JPEG")
+                zf.writestr(name, buf.getvalue())
+        r = c.post("/api/sfm",
+                   files={"zipfile": ("s.zip", zb.getvalue(),
+                                       "application/zip")})
+        assert r.status_code == 200, (r.status_code, r.text)
+        body = r.json()
+        assert "produced no model" in body["error"], body
+        assert "GPU fallback note" in body["warnings"], body
+    finally:
+        sfm.colmap_binary, sfm.reconstruct = old_bin, old_recon
 
 
 if __name__ == "__main__":

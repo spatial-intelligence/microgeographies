@@ -34,7 +34,7 @@ button:disabled { opacity: 0.45; cursor: default; }
 .hint { font-size: 0.85rem; opacity: 0.75; }
 #photoCanvas { width: 100%; margin-top: 8px; border: 1px solid #8886; border-radius: 4px; }
 #boxList { padding-left: 20px; }
-#depthImg { width: 100%; margin-top: 8px; border: 1px solid #8886; border-radius: 4px; }
+#depthCanvas { width: 100%; margin-top: 8px; border: 1px solid #8886; border-radius: 4px; }
 #map { height: 320px; margin-top: 8px; border: 1px solid #8886; border-radius: 4px; }
 #rawOut { overflow-x: auto; font-size: 0.75rem; max-height: 240px; overflow-y: auto; }
 #statusOut { font-weight: 600; }
@@ -60,4 +60,41 @@ button:disabled { opacity: 0.45; cursor: default; }
  * Narrow screens keep the single-column phone layout below. */
 body.wide { max-width: 1100px; }
 body.wide .sfm-view { height: 480px; }
+.sfm-single { height: 420px; }
+body.wide .sfm-single { height: 560px; }
+.sfm-wrap { position: relative; }
+.sfm-toolbar { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+.sfm-toolbar .tool { padding: 6px 14px; border: 1px solid #888; background: #f0f0f0; cursor: pointer; }
+.sfm-toolbar .tool.active { background: #222; color: #fff; border-color: #222; }
+/* SAM stage box: per-photo label output shown before the 3D view. */
+.sam-box { margin: 8px 0; border: 1px solid #8886; border-radius: 4px; padding: 8px 12px; }
+.sam-box h3 { margin: 0 0 4px; font-size: 0.9rem; }
+.sam-box ul { margin: 4px 0; padding-left: 20px; font-size: 0.85rem; }
+/* Point-size slider sits in the toolbar above the 3D view. */
+.tool-slider { display: inline-flex; gap: 8px; align-items: center; font-size: 0.85rem; }
+.tool-slider input[type="range"] { width: 140px; }
+/* Drag strips: thin labeled zones just inside the 3D display edge.
+ * Top strip zooms, bottom strip pans, both side strips roll. They do
+ * nothing on hover alone — press and slide along one to move. Hover
+ * only highlights (semi-transparent). */
+.sfm-view-wrap { position: relative; }
+.sfm-zone { position: absolute; z-index: 5; display: flex; align-items: center;
+  justify-content: center; color: #fff; background: rgba(0,0,0,0.25);
+  user-select: none; -webkit-user-select: none; touch-action: none; }
+.sfm-zone:hover { background: rgba(120,180,140,0.45); }
+.sfm-zone.active { background: rgba(120,180,140,0.65); }
+.sfm-zone span { font-size: 8pt; line-height: 1; letter-spacing: 1px; }
+.sfm-zone-top { top: 0; left: 0; right: 0; height: 22px;
+  border-bottom: 1px solid #ffffff22; cursor: ew-resize; }
+.sfm-zone-bottom { bottom: 0; left: 0; right: 0; height: 22px;
+  border-top: 1px solid #ffffff22; cursor: ew-resize; }
+.sfm-zone-left { left: 0; top: 22px; bottom: 22px; width: 26px;
+  border-right: 1px solid #ffffff22; cursor: ns-resize; }
+.sfm-zone-right { right: 0; top: 22px; bottom: 22px; width: 26px;
+  border-left: 1px solid #ffffff22; cursor: ns-resize; }
+/* Floating export dialog. */
+.sfm-dlg { position: absolute; z-index: 10; top: 52px; left: 12px; right: auto;
+  background: #fff; border: 1px solid #555; padding: 12px 16px; max-width: 420px; }
+.sfm-dlg h4 { margin: 0 0 4px; }
+.sfm-dlg-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
 @media (max-width: 560px) { .sfm-grid { grid-template-columns: 1fr; } }

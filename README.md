@@ -144,7 +144,9 @@ The server unzips to a temp dir and runs COLMAP — CLI preferred
 when the binary is missing. GPU choice is automatic: CUDA is used only
 when `torch.cuda` or `nvidia-smi` reports a real GPU, otherwise CPU
 flags are passed; `use_gpu=0` forces CPU. The sparse model
-(`SIMPLE_PINHOLE` and `PINHOLE` supported) is parsed, downsampled to at
+(`SIMPLE_PINHOLE`, `PINHOLE`, `SIMPLE_RADIAL`, `RADIAL`, `OPENCV`,
+and `FULL_OPENCV` supported, distortion applied when voting labels)
+is parsed, downsampled to at
 most ~50000 points, and returned as inline ASCII PLY text plus
 `cameras` (`[{image, qvec, tvec, width, height, model, params}]`) and
 `point_labels` (`{point_index: {label, votes}}`). Label voting projects

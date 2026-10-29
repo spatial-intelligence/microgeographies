@@ -98,7 +98,7 @@ async def detect(
     detector: str = Form(default="sam"),
 ):
     raw = await image.read()
-    pil = Image.open(io.BytesIO(raw)).convert("RGB")
+    pil = geo.oriented_image(Image.open(io.BytesIO(raw)).convert("RGB"))
     w, h = pil.size
     try:
         names = json.loads(concepts)
@@ -222,7 +222,10 @@ def thumbnail_data_url(pil, max_w=480):
 def get_depth(pil, model_id=None):
     """Relative-depth grid for an image, or (None, error) when unavailable."""
     try:
-        return geo.estimate_depth_grid(pil, model_id=model_id)["grid"], None
+        grid_w, grid_h = geo.depth_grid_dims(pil)
+        return geo.estimate_depth_grid(
+            pil, grid_w=grid_w, grid_h=grid_h,
+            model_id=model_id)["grid"], None
     except Exception as e:
         return None, f"depth unavailable: {e}"
 
@@ -292,7 +295,7 @@ async def project(
     absolute pixels of the uploaded image.
     """
     raw = await image.read()
-    pil = Image.open(io.BytesIO(raw)).convert("RGB")
+    pil = geo.oriented_image(Image.open(io.BytesIO(raw)).convert("RGB"))
     try:
         dets = json.loads(boxes)
         if isinstance(dets, dict):
@@ -317,7 +320,7 @@ async def depth_map(image: UploadFile = File(...),
                     model: str = Form(default="")):
     """Monocular relative-depth grid for an image, plus any EXIF GPS."""
     raw = await image.read()
-    pil = Image.open(io.BytesIO(raw)).convert("RGB")
+    pil = geo.oriented_image(Image.open(io.BytesIO(raw)).convert("RGB"))
     w, h = pil.size
     try:
         result = geo.estimate_depth_grid(pil, model_id=model or None)
@@ -406,7 +409,7 @@ async def batch(
     records = []
     for info in members[:MAX_BATCH_IMAGES]:
         try:
-            pil = Image.open(io.BytesIO(zf.read(info.filename))).convert("RGB")
+            pil = geo.oriented_image(Image.open(io.BytesIO(zf.read(info.filename))).convert("RGB"))
         except Exception:
             continue
         w, h = pil.size
@@ -449,6 +452,7 @@ async def sfm(
     detections: str = Form(default=""),
     concepts: str = Form(default=""),
     detector: str = Form(default="sam"),
+    dense: str = Form(default="0"),
     use_gpu: str = Form(default="1"),
 ):
     """Reconstruct a zip of photos with COLMAP and label the 3D points.
@@ -459,8 +463,10 @@ async def sfm(
     convention as /api/project), `concepts` (optional JSON array or
     comma string, e.g. ["door"]; detected per image with `detector`
     to fill images missing from `detections`), `detector`
-    ("sam" | "clip", server-side only), `use_gpu` ("1" default: use
-    CUDA only when actually available; "0" forces CPU).
+    ("sam" | "clip", server-side only), `dense` ("1" to also run
+    COLMAP multi-view stereo + fusion after the sparse model),
+    `use_gpu` ("1" default: use CUDA only when actually available;
+    "0" forces CPU).
 
     No monocular-depth pass runs on this route: labels come from
     boxes only, and geometry comes from COLMAP. GPU choice is
@@ -517,14 +523,19 @@ async def sfm(
 
     try:
         names_in = parse_concepts(concepts)
+        want_dense = str(dense or "").strip().lower() not in (
+            "", "0", "false", "no", "off")
         with tempfile.TemporaryDirectory(prefix="sfm-") as tmp:
-            img_dir = os.path.join(tmp, "images")
+            # Images live inside the workspace so patch_match_stereo
+            # can use the same directory (COLMAP workspace layout).
+            workspace = os.path.join(tmp, "workspace")
+            img_dir = os.path.join(workspace, "images")
             os.makedirs(img_dir, exist_ok=True)
             kept = {}  # basename -> PIL (depth-free label source)
             for info in members[:MAX_BATCH_IMAGES]:
                 try:
                     data = zf.read(info.filename)
-                    pil = Image.open(io.BytesIO(data)).convert("RGB")
+                    pil = geo.oriented_image(Image.open(io.BytesIO(data)).convert("RGB"))
                 except Exception:
                     continue
                 base = os.path.basename(info.filename)
@@ -555,7 +566,7 @@ async def sfm(
                         "cameras": [], "gpu_used": gpu_used,
                         "warnings": warnings}
             model_dir, run_warnings = sfm_mod.reconstruct(
-                img_dir, os.path.join(tmp, "workspace"), gpu_used)
+                img_dir, workspace, gpu_used)
             warnings.extend(run_warnings)
             cameras, points, colors, parse_warnings = sfm_mod.parse_model(
                 model_dir)
@@ -575,18 +586,59 @@ async def sfm(
                             sfm_mod.vote_point_labels(
                                 points, cameras, dets).items()}
             registered = {c["image"] for c in cameras}
+            dense_ply, dense_count, dense_total = None, 0, 0
+            dense_labels = {}
+            if want_dense:
+                if sfm_mod.colmap_binary() is None:
+                    warnings.append("dense needs the COLMAP CLI: "
+                                    "pycolmap fallback gives sparse only")
+                else:
+                    try:
+                        fused, dense_warnings = sfm_mod.run_dense_cli(
+                            sfm_mod.colmap_binary(), workspace, gpu_used)
+                        warnings.extend(dense_warnings)
+                        d_pts, d_cols = sfm_mod.read_ply_points(fused)
+                        dense_total = len(d_pts)
+                        if dense_total > sfm_mod.DENSE_PLY_CAP:
+                            stride = -(-dense_total //
+                                       sfm_mod.DENSE_PLY_CAP)
+                            d_pts = d_pts[::stride]
+                            d_cols = d_cols[::stride]
+                            warnings.append(
+                                f"downsampled {dense_total} dense points "
+                                f"to {len(d_pts)} for the reply")
+                        dense_count = len(d_pts)
+                        dense_ply = sfm_mod.write_ply_ascii(d_pts, d_cols)
+                        dense_labels = {
+                            str(k): v for k, v in
+                            sfm_mod.vote_point_labels_numpy(
+                                d_pts, cameras, dets).items()}
+                    except Exception as e:
+                        warnings.append(f"dense stereo failed ({e}): "
+                                        "sparse cloud still returned")
             return {
                 "ply": ply_text,
                 "point_count": len(points),
                 "total_points": total,
+                # Per-image SAM/CLIP boxes that fed label voting
+                # ({image: [{label, box, score}]}), shown in the page's
+                # SAM stage box before the 3D view.
+                "detections": dets,
                 "cameras": cameras,
                 "point_labels": point_labels,
                 "registered": sorted(registered),
                 "unregistered": [n for n in names if n not in registered],
+                "dense_ply": dense_ply,
+                "dense_count": dense_count,
+                "dense_total": dense_total,
+                "dense_labels": dense_labels,
                 "gpu_used": gpu_used,
                 "warnings": warnings,
             }
     except Exception as e:  # reconstruction failure is data, never a 500
+        # The backend may have warned before failing (e.g. CPU fallback):
+        # those notes live on the error now that reconstruct() raised.
+        warnings.extend(getattr(e, "warnings", None) or [])
         return {"error": f"sfm failed: {e}", "cameras": [],
                 "gpu_used": gpu_used, "warnings": warnings}
 

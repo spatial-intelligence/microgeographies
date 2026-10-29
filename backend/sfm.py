@@ -13,7 +13,23 @@ import subprocess
 
 MAX_SFM_POINTS = 50000  # downsample cap for the returned PLY
 
-SUPPORTED_CAMERA_MODELS = ("SIMPLE_PINHOLE", "PINHOLE")
+
+class SfmError(RuntimeError):
+    """Reconstruction failure carrying the backend warnings so far.
+
+    run_colmap_* build a warnings list as they go (GPU fallback, CPU
+    notes); raising plain RuntimeError would strand those notes in a
+    local that never reaches the caller, so every failure reply would
+    lose its context. SfmError is still a RuntimeError, so existing
+    callers catching RuntimeError are unaffected.
+    """
+
+    def __init__(self, message, warnings=()):
+        super().__init__(message)
+        self.warnings = list(warnings)
+
+SUPPORTED_CAMERA_MODELS = ("SIMPLE_PINHOLE", "PINHOLE", "SIMPLE_RADIAL",
+                            "RADIAL", "OPENCV", "FULL_OPENCV")
 
 
 # --------------------------------------------------------------------------
@@ -78,21 +94,39 @@ def qvec_to_rotmat(qvec):
     ]
 
 
-def _intrinsics(model, params):
-    """(fx, fy, cx, cy) for the supported COLMAP camera models."""
+def _distortion(model, params):
+    """(fx, fy, cx, cy, k1, k2, k3, p1, p2) for the supported models."""
+    p = [float(v) for v in params]
     if model == "SIMPLE_PINHOLE":
-        f, cx, cy = (float(v) for v in params[:3])
-        return f, f, cx, cy
+        f, cx, cy = p[:3]
+        return f, f, cx, cy, 0.0, 0.0, 0.0, 0.0, 0.0
     if model == "PINHOLE":
-        fx, fy, cx, cy = (float(v) for v in params[:4])
-        return fx, fy, cx, cy
+        fx, fy, cx, cy = p[:4]
+        return fx, fy, cx, cy, 0.0, 0.0, 0.0, 0.0, 0.0
+    if model == "SIMPLE_RADIAL":
+        f, cx, cy, k = p[:4]
+        return f, f, cx, cy, k, 0.0, 0.0, 0.0, 0.0
+    if model == "RADIAL":
+        f, cx, cy, k1, k2 = p[:5]
+        return f, f, cx, cy, k1, k2, 0.0, 0.0, 0.0
+    if model == "OPENCV":
+        fx, fy, cx, cy, k1, k2, p1, p2 = p[:8]
+        return fx, fy, cx, cy, k1, k2, 0.0, p1, p2
+    if model == "FULL_OPENCV":
+        fx, fy, cx, cy, k1, k2, p1, p2, k3, k4, k5, k6 = p[:12]
+        return fx, fy, cx, cy, k1, k2, k3, p1, p2
     raise ValueError(f"unsupported camera model: {model}")
 
 
 def project_point(xyz, qvec, tvec, model, params, width, height):
     """Project a 3D point into an image; None when behind the camera or
-    outside the frame. Returns (u, v, depth) in original pixels."""
-    fx, fy, cx, cy = _intrinsics(model, params)
+    outside the frame. Returns (u, v, depth) in original pixels.
+
+    Applies the model's Brown-Conrady distortion, so distorted models
+    (SIMPLE_RADIAL, RADIAL, OPENCV, ...) vote labels at the pixels
+    where the features were actually observed.
+    """
+    fx, fy, cx, cy, k1, k2, k3, p1, p2 = _distortion(model, params)
     r = qvec_to_rotmat(qvec)
     x, y, z = (float(v) for v in xyz)
     tx, ty, tz = (float(v) for v in tvec)
@@ -101,8 +135,13 @@ def project_point(xyz, qvec, tvec, model, params, width, height):
     zc = r[2][0] * x + r[2][1] * y + r[2][2] * z + tz
     if zc <= 0:
         return None
-    u = fx * xc / zc + cx
-    v = fy * yc / zc + cy
+    xn, yn = xc / zc, yc / zc
+    r2 = xn * xn + yn * yn
+    radial = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3))
+    xd = xn * radial + 2.0 * p1 * xn * yn + p2 * (r2 + 2.0 * xn * xn)
+    yd = yn * radial + p1 * (r2 + 2.0 * yn * yn) + 2.0 * p2 * xn * yn
+    u = fx * xd + cx
+    v = fy * yd + cy
     if not (0 <= u < width and 0 <= v < height):
         return None
     return u, v, zc
@@ -356,7 +395,7 @@ def vote_point_labels(points, cameras, detections):
 def _run(cmd, warnings):
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True,
-                       timeout=1800)
+                       errors="replace", timeout=1800)
     except subprocess.CalledProcessError as e:
         tail = (e.stderr or e.stdout or "")[-2000:]
         raise RuntimeError(f"{' '.join(cmd[:2])} failed: {tail}")
@@ -427,6 +466,33 @@ def _ensure_text_model(binary, model_dir, warnings, runner=None):
         "walls, glass, and sky do not match.")
 
 
+def _sift_gpu_flags(binary, gpu_used):
+    """(extract_args, match_args) GPU flags for this COLMAP version.
+
+    COLMAP 3.x spells them --SiftExtraction/use_gpu and
+    --SiftMatching/use_gpu; 4.x moved them to --FeatureExtraction/
+    --FeatureMatching (plus gpu_index). Probed from --help so either
+    binary works without version pinning.
+    """
+    try:
+        proc = subprocess.run(
+            [binary, "feature_extractor", "--help"],
+            capture_output=True, text=True, timeout=60)
+        out = (proc.stdout or "") + (proc.stderr or "")
+    except Exception:
+        out = ""
+    flag = "1" if gpu_used else "0"
+    if "FeatureExtraction.use_gpu" in out:
+        extract = ["--FeatureExtraction.use_gpu", flag]
+        match = ["--FeatureMatching.use_gpu", flag]
+        if gpu_used:
+            extract += ["--FeatureExtraction.gpu_index", "0"]
+            match += ["--FeatureMatching.gpu_index", "0"]
+        return extract, match
+    return (["--SiftExtraction.use_gpu", flag],
+            ["--SiftMatching.use_gpu", flag])
+
+
 def run_colmap_cli(images_dir, workspace_dir, gpu_used):
     """Feature extraction + exhaustive matching + mapping. Returns the
     best sparse model dir. Raises RuntimeError on failure."""
@@ -437,29 +503,78 @@ def run_colmap_cli(images_dir, workspace_dir, gpu_used):
     db_path = os.path.join(workspace_dir, "sfm.db")
     sparse_dir = os.path.join(workspace_dir, "sparse")
     os.makedirs(sparse_dir, exist_ok=True)
-    gpu_flag = "1" if gpu_used else "0"
     if not gpu_used:
         warnings.append("no GPU detected: COLMAP runs on CPU "
                         "(SIFT extraction/matching without CUDA)")
-    _run([binary, "feature_extractor",
-          "--database_path", db_path, "--image_path", images_dir,
-          "--SiftExtraction.use_gpu", gpu_flag], warnings)
-    _run([binary, "exhaustive_matcher",
-          "--database_path", db_path,
-          "--SiftMatching.use_gpu", gpu_flag], warnings)
-    _run([binary, "mapper",
-          "--database_path", db_path, "--image_path", images_dir,
-          "--output_path", sparse_dir], warnings)
-    model_dir = _pick_model_dir(sparse_dir)
-    if model_dir is None:
-        raise RuntimeError(
-            f"COLMAP mapper produced no model in {sparse_dir} "
-            f"(contains: {_sparse_listing(sparse_dir)}). This usually "
-            "means too few matching features: use more photos with "
-            "60-80% overlap, steady lighting, and textured subjects — "
-            "blank walls, glass, and sky do not match.")
-    _ensure_text_model(binary, model_dir, warnings)
+    extract_gpu, match_gpu = _sift_gpu_flags(binary, gpu_used)
+    try:
+        _run([binary, "feature_extractor",
+              "--database_path", db_path, "--image_path", images_dir,
+              *extract_gpu], warnings)
+        _run([binary, "exhaustive_matcher",
+              "--database_path", db_path,
+              *match_gpu], warnings)
+        _run([binary, "mapper",
+              "--database_path", db_path, "--image_path", images_dir,
+              "--output_path", sparse_dir], warnings)
+        model_dir = _pick_model_dir(sparse_dir)
+        if model_dir is None:
+            raise RuntimeError(
+                f"COLMAP mapper produced no model in {sparse_dir} "
+                f"(contains: {_sparse_listing(sparse_dir)}). This usually "
+                "means too few matching features: use more photos with "
+                "60-80% overlap, steady lighting, and textured subjects — "
+                "blank walls, glass, and sky do not match.")
+        _ensure_text_model(binary, model_dir, warnings)
+    except SfmError:
+        raise
+    except RuntimeError as e:
+        raise SfmError(str(e), warnings) from e
     return model_dir, warnings
+
+
+SPARSE_SIFT_MAX_FEATURES = 16384  # up from COLMAP's 8192 default:
+# the pycolmap path has no dense-MVS fallback, so a richer sparse
+# extraction is the only lever for denser clouds there.
+
+
+def _validated_extraction_options(pycolmap, gpu_used, warnings):
+    """FeatureExtractionOptions honoring gpu_used when the build allows.
+
+    A GPU can be visible (nvidia-smi lists it) while the installed
+    pycolmap wheel itself has no CUDA support — asking for GPU
+    extraction then dies inside extract_features with the cryptic
+    "Check failed: extraction_options.Check()". The options' own
+    check() is the authority, so a failed GPU check falls back to CPU
+    with a warning instead of raising. Returns (options, gpu_effective).
+    """
+    fe_opts = pycolmap.FeatureExtractionOptions()
+    if hasattr(fe_opts, "use_gpu"):
+        fe_opts.use_gpu = bool(gpu_used)
+    sift = getattr(fe_opts, "sift", None)
+    if sift is not None and hasattr(sift, "max_num_features"):
+        try:
+            sift.max_num_features = SPARSE_SIFT_MAX_FEATURES
+        except (TypeError, ValueError, AttributeError):
+            pass
+    check = getattr(fe_opts, "check", None)
+    if callable(check) and not check():
+        if gpu_used:
+            warnings.append(
+                "GPU feature extraction is unavailable in this pycolmap "
+                "build (no CUDA support): falling back to CPU")
+            if hasattr(fe_opts, "use_gpu"):
+                fe_opts.use_gpu = False
+            recheck = getattr(fe_opts, "check", None)
+            if callable(recheck) and not recheck():
+                raise RuntimeError(
+                    "pycolmap FeatureExtractionOptions invalid even on "
+                    "CPU: cannot extract features")
+        else:
+            raise RuntimeError(
+                "pycolmap FeatureExtractionOptions invalid: "
+                "cannot extract features")
+    return fe_opts, bool(getattr(fe_opts, "use_gpu", gpu_used))
 
 
 def run_colmap_pycolmap(images_dir, workspace_dir, gpu_used):
@@ -482,37 +597,42 @@ def run_colmap_pycolmap(images_dir, workspace_dir, gpu_used):
                            "match_exhaustive / incremental_mapping")
     # Newer pycolmap speaks extraction_options + device; older ones
     # take sift_options. Prefer the new spelling when present.
-    if hasattr(pycolmap, "FeatureExtractionOptions"):
-        fe_opts = pycolmap.FeatureExtractionOptions()
-        if hasattr(fe_opts, "use_gpu"):
-            fe_opts.use_gpu = bool(gpu_used)
-        kwargs = {"extraction_options": fe_opts}
-        dev = getattr(pycolmap, "Device", None)
-        if dev is not None:
-            for attr in (("cuda", True), ("cpu", False)):
-                if gpu_used == attr[1] and hasattr(dev, attr[0]):
-                    kwargs["device"] = getattr(dev, attr[0])
-                    break
-        extract(db_path, images_dir, **kwargs)
-    else:
-        sift_opts = None
-        try:
-            sift_opts = pycolmap.SiftExtractionOptions()
-            if hasattr(sift_opts, "use_gpu"):
-                sift_opts.use_gpu = bool(gpu_used)
-        except Exception:
+    try:
+        if hasattr(pycolmap, "FeatureExtractionOptions"):
+            fe_opts, gpu_effective = _validated_extraction_options(
+                pycolmap, gpu_used, warnings)
+            kwargs = {"extraction_options": fe_opts}
+            dev = getattr(pycolmap, "Device", None)
+            if dev is not None:
+                for attr in (("cuda", True), ("cpu", False)):
+                    if gpu_effective == attr[1] and hasattr(dev, attr[0]):
+                        kwargs["device"] = getattr(dev, attr[0])
+                        break
+            extract(db_path, images_dir, **kwargs)
+        else:
             sift_opts = None
-        kwargs = ({"sift_options": sift_opts}
-                  if sift_opts is not None else {})
-        extract(db_path, images_dir, **kwargs)
-    match(db_path)
-    maps = mapping(db_path, images_dir, sparse_dir)
-    if not maps:
-        raise RuntimeError("pycolmap produced no model "
-                           "(too few matches? try more overlap)")
-    best = max(maps.values(), key=lambda r: len(getattr(r, "points3D", [])))
-    model_dir = os.path.join(sparse_dir, "0")
-    best.write_text(model_dir)
+            try:
+                sift_opts = pycolmap.SiftExtractionOptions()
+                if hasattr(sift_opts, "use_gpu"):
+                    sift_opts.use_gpu = bool(gpu_used)
+            except Exception:
+                sift_opts = None
+            kwargs = ({"sift_options": sift_opts}
+                      if sift_opts is not None else {})
+            extract(db_path, images_dir, **kwargs)
+        match(db_path)
+        maps = mapping(db_path, images_dir, sparse_dir)
+        if not maps:
+            raise RuntimeError("pycolmap produced no model "
+                               "(too few matches? try more overlap)")
+        best = max(maps.values(),
+                   key=lambda r: len(getattr(r, "points3D", [])))
+        model_dir = os.path.join(sparse_dir, "0")
+        best.write_text(model_dir)
+    except SfmError:
+        raise
+    except (RuntimeError, ValueError) as e:
+        raise SfmError(str(e), warnings) from e
     return model_dir, warnings
 
 
@@ -521,3 +641,222 @@ def reconstruct(images_dir, workspace_dir, gpu_used):
     if colmap_binary() is not None:
         return run_colmap_cli(images_dir, workspace_dir, gpu_used)
     return run_colmap_pycolmap(images_dir, workspace_dir, gpu_used)
+
+
+DENSE_PLY_CAP = 250000  # max dense points returned inline
+
+
+def _dense_gpu_flags(binary, gpu_used):
+    """GPU flag args for patch_match_stereo, probed from --help.
+
+    Some builds spell it --PatchMatchStereo.use_gpu, others only
+    --PatchMatchStereo.gpu_index (0 = first GPU, -1 = CPU).
+    """
+    try:
+        proc = subprocess.run(
+            [binary, "patch_match_stereo", "--help"],
+            capture_output=True, text=True, timeout=60)
+        out = (proc.stdout or "") + (proc.stderr or "")
+    except Exception:
+        out = ""
+    args = []
+    if "PatchMatchStereo.use_gpu" in out:
+        args += ["--PatchMatchStereo.use_gpu", "1" if gpu_used else "0"]
+    if "PatchMatchStereo.gpu_index" in out:
+        if gpu_used or "PatchMatchStereo.use_gpu" not in out:
+            args += ["--PatchMatchStereo.gpu_index",
+                     "0" if gpu_used else "-1"]
+    return args
+
+
+def run_dense_cli(binary, workspace_dir, gpu_used):
+    """patch_match_stereo + stereo_fusion. Returns (fused_ply, warnings).
+
+    Expects workspace/images + workspace/sparse (COLMAP workspace
+    layout). Raises RuntimeError with the tool's log tail on failure.
+    """
+    warnings = []
+    if not gpu_used:
+        warnings.append("dense stereo runs on CPU (slow on large photos)")
+    _run([binary, "patch_match_stereo",
+          "--workspace_path", workspace_dir,
+          "--workspace_format", "COLMAP",
+          *_dense_gpu_flags(binary, gpu_used)], warnings)
+    fused = os.path.join(workspace_dir, "fused.ply")
+    _run([binary, "stereo_fusion",
+          "--workspace_path", workspace_dir,
+          "--workspace_format", "COLMAP",
+          "--input_type", "photometric",
+          "--output_path", fused], warnings)
+    if not os.path.isfile(fused):
+        raise RuntimeError("stereo_fusion left no fused.ply "
+                           f"(workspace: {_sparse_listing(workspace_dir)})")
+    return fused, warnings
+
+
+_PLY_SCALARS = {"char": "b", "uchar": "B", "short": "h", "ushort": "H",
+                "int": "i", "uint": "I", "int8": "b", "uint8": "B",
+                "int16": "h", "uint16": "H", "int32": "i", "uint32": "I",
+                "float": "f", "float32": "f", "double": "d",
+                "float64": "d"}
+
+
+def read_ply_points(path):
+    """(points, colors) from a PLY vertex cloud (ASCII or binary LE).
+
+    Reads x y z plus red/green/blue (missing colors default to grey).
+    Extra properties (normals, faces) are skipped.
+    """
+    with open(path, "rb") as fh:
+        header = []
+        while True:
+            line = fh.readline().decode("ascii", "replace").strip()
+            header.append(line)
+            if line == "end_header" or not line:
+                break
+        if not header or not header[0].startswith("ply"):
+            raise ValueError("not a PLY file")
+        fmt = header[1].split() if len(header) > 1 else []
+        binary = len(fmt) >= 2 and fmt[1] == "binary_little_endian"
+        count, props = 0, []
+        in_vertex = False
+        for ln in header:
+            parts = ln.split()
+            if parts[:2] == ["element", "vertex"]:
+                in_vertex = True
+                count = int(parts[2])
+            elif parts[:1] == ["element"]:
+                in_vertex = False
+            elif parts[:1] == ["property"] and in_vertex:
+                if parts[1] == "list":
+                    props.append(None)  # unsupported in vertices: skip
+                else:
+                    props.append((parts[1], parts[2]))
+        names = [p[1] for p in props if p]
+        try:
+            xi, yi, zi = names.index("x"), names.index("y"), names.index("z")
+        except ValueError:
+            raise ValueError("PLY vertices lack x/y/z")
+        col_idx = []
+        for want in (("red", "green", "blue"), ("r", "g", "b")):
+            if all(w in names for w in want):
+                col_idx = [names.index(w) for w in want]
+                break
+        points, colors = [], []
+        if binary:
+            if any(p is None for p in props):
+                raise ValueError("list properties unsupported in binary PLY")
+            ok = [(t, nm) for t, nm in props if t in _PLY_SCALARS]
+            if len(ok) != len(props):
+                raise ValueError("unsupported binary PLY scalar type")
+            fmt_row = "<" + "".join(_PLY_SCALARS[t] for t, _ in ok)
+            names_b = [nm for _, nm in ok]
+            import struct
+            row_struct = struct.Struct(fmt_row)
+            vals = fh.read(row_struct.size * count)
+            if len(vals) < row_struct.size * count:
+                raise ValueError("truncated binary PLY body")
+            for tup in struct.iter_unpack(fmt_row, vals):
+                row = dict(zip(names_b, tup))
+                points.append([float(row["x"]), float(row["y"]),
+                               float(row["z"])])
+                colors.append(_clamp_rgb(
+                    [row[names_b[i]] for i in col_idx]) if col_idx
+                    else [128, 128, 128])
+        else:
+            for _ in range(count):
+                parts = fh.readline().decode("ascii", "replace").split()
+                if len(parts) < len(names):
+                    raise ValueError("truncated ASCII PLY body")
+                vals = dict(zip(names, parts))
+                points.append([float(vals["x"]), float(vals["y"]),
+                               float(vals["z"])])
+                colors.append(_clamp_rgb(
+                    [vals[names[i]] for i in col_idx]) if col_idx
+                    else [128, 128, 128])
+    return points, colors
+
+
+def _clamp_rgb(vals):
+    """Three channel values -> [0, 255] ints."""
+    out = []
+    for v in vals:
+        try:
+            out.append(max(0, min(255, int(round(float(v))))))
+        except (TypeError, ValueError):
+            out.append(0)
+    return out
+
+
+def vote_point_labels_numpy(points, cameras, detections):
+    """Same contract as vote_point_labels, vectorized with numpy.
+
+    points: [[x, y, z], ...]; returns {idx: {label, votes, counts}}.
+    """
+    import numpy as np
+    norm = _norm_detections(detections)
+    pts = np.asarray(points, dtype=np.float64)
+    n = pts.shape[0]
+    counts, scores = {}, {}
+    for cam in cameras:
+        dets = (norm.get(cam["image"])
+                or norm.get(os.path.basename(cam["image"])))
+        if not dets:
+            continue
+        fx, fy, cx, cy, k1, k2, k3, p1, p2 = _distortion(
+            cam["model"], cam["params"])
+        r = np.array(qvec_to_rotmat(cam["qvec"]), dtype=np.float64)
+        t = np.array(cam["tvec"], dtype=np.float64)
+        xc = pts @ r.T + t
+        z = xc[:, 2]
+        front = z > 0
+        xn = np.zeros(n)
+        yn = np.zeros(n)
+        xn[front] = xc[front, 0] / z[front]
+        yn[front] = xc[front, 1] / z[front]
+        r2 = xn * xn + yn * yn
+        radial = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3))
+        xd = xn * radial + 2.0 * p1 * xn * yn + p2 * (r2 + 2.0 * xn * xn)
+        yd = yn * radial + p1 * (r2 + 2.0 * yn * yn) + 2.0 * p2 * xn * yn
+        u = fx * xd + cx
+        v = fy * yd + cy
+        w, h = cam["width"], cam["height"]
+        inside_frame = (front & (u >= 0) & (u < w) & (v >= 0) & (v < h))
+        if not inside_frame.any():
+            continue
+        for d in dets:
+            try:
+                x1, y1, x2, y2 = d["box"][:4]
+            except (KeyError, TypeError, ValueError):
+                continue
+            hit = (inside_frame & (u >= min(x1, x2)) & (u <= max(x1, x2))
+                   & (v >= min(y1, y2)) & (v <= max(y1, y2)))
+            idx = np.nonzero(hit)[0]
+            if len(idx) == 0:
+                continue
+            label = str(d.get("label", ""))
+            col = counts.get(label)
+            if col is None:
+                col = np.zeros(n, dtype=np.int64)
+                counts[label] = col
+                scores[label] = np.zeros(n, dtype=np.float64)
+            col[idx] += 1
+            try:
+                sc = float(d.get("score", 1.0))
+            except (TypeError, ValueError):
+                sc = 1.0
+            scores[label][idx] += sc
+    labels = {}
+    if counts:
+        voted = np.zeros(n, dtype=bool)
+        for col in counts.values():
+            voted |= col > 0
+        for i in np.nonzero(voted)[0]:
+            i = int(i)
+            winner = sorted(counts,
+                            key=lambda l: (-counts[l][i],
+                                           -scores[l][i], l))[0]
+            labels[i] = {"label": winner, "votes": int(counts[winner][i]),
+                         "counts": {l: int(counts[l][i]) for l in counts
+                                    if counts[l][i]}}
+    return labels

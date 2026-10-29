@@ -248,6 +248,66 @@ def test_snap_labels_cover_brief():
             assert label not in SNAP_LABELS  # bins/steps keep raw projection
 
 
+def _portrait_upload_jpeg():
+    """Landscape bytes with EXIF orientation 6 + GPS, i.e. a portrait
+    phone photo as uploaded: browsers show it 40x80, Pillow opens 80x40."""
+    import io
+    from PIL import Image
+    from PIL.TiffImagePlugin import IFDRational
+    img = Image.new("RGB", (80, 40), (10, 100, 200))
+    ex = Image.Exif()
+    ex[0x0112] = 6
+    gps = ex.get_ifd(0x8825)
+    gps[1] = "N"
+    gps[2] = (IFDRational(51, 1), IFDRational(30, 1), IFDRational(0, 1))
+    gps[3] = "W"
+    gps[4] = (IFDRational(0, 1), IFDRational(7, 1), IFDRational(0, 1))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", exif=ex)
+    buf.seek(0)
+    return Image.open(buf)
+
+
+def test_oriented_image_applies_exif():
+    from depth import oriented_image
+    out = oriented_image(_portrait_upload_jpeg())
+    assert out.size == (40, 80), out.size  # as seen, not as stored
+
+
+def test_oriented_image_keeps_gps():
+    from depth import oriented_image
+    out = oriented_image(_portrait_upload_jpeg())
+    loc = extract_exif_gps(out)
+    assert loc is not None, loc
+    assert abs(loc["lat"] - 51.5) < 1e-9, loc
+    assert abs(loc["lon"] - -(7.0 / 60.0)) < 1e-9, loc
+
+
+def test_depth_grid_dims_follow_aspect():
+    from depth import depth_grid_dims
+    from PIL import Image
+    assert depth_grid_dims(Image.new("RGB", (80, 40))) == (80, 60)
+    assert depth_grid_dims(Image.new("RGB", (40, 80))) == (60, 80)
+
+
+def test_estimate_grid_defaults_follow_aspect():
+    import os
+    from depth import estimate_depth_grid
+    from PIL import Image
+    old = os.environ.get("MOCK_DEPTH")
+    os.environ["MOCK_DEPTH"] = "1"
+    try:
+        tall = estimate_depth_grid(Image.new("RGB", (40, 80)))["grid"]
+        wide = estimate_depth_grid(Image.new("RGB", (80, 40)))["grid"]
+    finally:
+        if old is None:
+            del os.environ["MOCK_DEPTH"]
+        else:
+            os.environ["MOCK_DEPTH"] = old
+    assert len(tall) == 80 and len(tall[0]) == 60, (len(tall), len(tall[0]))
+    assert len(wide) == 60 and len(wide[0]) == 80, (len(wide), len(wide[0]))
+
+
 TESTS = [v for k, v in sorted(globals().items())
          if k.startswith("test_") and callable(v)]
 

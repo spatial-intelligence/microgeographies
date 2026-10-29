@@ -197,6 +197,40 @@ def depth_data_url(depth_grid, out_w=480):
 
 
 # --------------------------------------------------------------------------
+# Upload intake: orientation + grid shape follow the photo as seen
+# --------------------------------------------------------------------------
+
+def oriented_image(pil_image):
+    """Apply the EXIF orientation tag so pixels match what was seen.
+
+    Phone photos are usually stored landscape with an orientation flag;
+    Pillow (unlike browsers) does not auto-apply it, so without this
+    the depth model, boxes, and projections all run sideways. Images
+    without the tag (PNGs, canvas JPEGs) pass through untouched.
+    Never raises.
+    """
+    try:
+        from PIL import ImageOps
+        return ImageOps.exif_transpose(pil_image)
+    except Exception:
+        return pil_image
+
+
+def depth_grid_dims(pil_image):
+    """(grid_w, grid_h) following the photo aspect ratio.
+
+    The depth grid must cover the same frame the boxes live in: a fixed
+    landscape grid would squash portrait photos (and the box footprints
+    sampled from them). Long edge keeps 80 cells.
+    """
+    try:
+        w, h = pil_image.size
+    except Exception:
+        return 80, 60
+    return (60, 80) if h > w else (80, 60)
+
+
+# --------------------------------------------------------------------------
 # EXIF GPS fallback (photo uploaded later, no live phone fix)
 # --------------------------------------------------------------------------
 
@@ -349,14 +383,18 @@ def _load_depth_model(model_id=None):
     return _depth_model
 
 
-def estimate_depth_grid(pil_image, grid_w=80, grid_h=60, model_id=None):
+def estimate_depth_grid(pil_image, grid_w=None, grid_h=None, model_id=None):
     """Relative depth as a grid_h x grid_w nested list, 0 = far, 1 = near.
 
-    Uses ``MOCK_DEPTH=1`` gradient when set (tests, offline dev),
-    otherwise the depth model via transformers (downloads weights on
-    first use). The full-resolution prediction is min-max normalized
-    then downsampled to the grid by block averaging.
+    Grid dims default to the photo aspect via depth_grid_dims (80 cells
+    on the long edge) so portrait photos get portrait grids. Uses
+    ``MOCK_DEPTH=1`` gradient when set (tests, offline dev), otherwise
+    the depth model via transformers (downloads weights on first use).
+    The full-resolution prediction is min-max normalized then
+    downsampled to the grid by block averaging.
     """
+    if grid_w is None or grid_h is None:
+        grid_w, grid_h = depth_grid_dims(pil_image)
     if os.getenv("MOCK_DEPTH") == "1":
         return {"grid": mock_depth_grid(grid_w, grid_h), "mock": True}
     import torch

@@ -1,0 +1,5 @@
+Log file created at: 2026/10/28 22:16:42
+Running on machine: vortex
+Running duration (h:mm:ss): 0:00:00
+Log line format: [IWEF]yyyymmdd hh:mm:ss.uuuuuu threadid file:line] msg
+E20261028 22:16:42.585019 132653634585664 helpers.h:120] Internal AttributeError: 'pycolmap._core.Image' object attribute 'cam_from_world' is read-only

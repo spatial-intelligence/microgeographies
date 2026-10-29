@@ -12,7 +12,7 @@
     tokenInput = $("tokenInput"),
     sendBtn = $("sendBtn"), statusOut = $("statusOut"),
     canvas = $("photoCanvas"), boxList = $("boxList"),
-    depthImg = $("depthImg"), depthNote = $("depthNote"),
+    depthNote = $("depthNote"),
     mapNote = $("mapNote"),
     rawOut = $("rawOut"), exportBtn = $("exportBtn"), pngBtn = $("pngBtn"),
     reprojectBtn = $("reprojectBtn");
@@ -690,6 +690,7 @@
       }
       boxList.appendChild(li);
     });
+    drawDepth(); // overlay follows boxes (and their distances) everywhere
   }
 
   exportBtn.addEventListener("click", () => {
@@ -929,20 +930,183 @@
   // the CDN is unreachable; a 503 (no COLMAP on the server) degrades
   // to a plain message.
   const sfmBtn = $("sfmBtn"), sfmOut = $("sfmOut");
-  let sfmViews = [];
+  let sfmViewer = null;
+  let sfmLib = null;
+  // Loaded cloud for viewing + export: Float32Arrays plus parallel
+  // label/vote arrays (null label = unlabeled).
+  let sfmData = null;
+
+  function sfmEnsureViewer() {
+    if (sfmViewer || !sfmLib) return sfmViewer;
+    sfmViewer = sfmLib.createViewer($("sfmView"), $("sfmPopup"));
+    wireSfmTools();
+    return sfmViewer;
+  }
+
+  function sfmToolButton(id, active) {
+    const el = $(id);
+    if (el) el.classList.toggle("active", !!active);
+  }
+
+  // Toolbar: orbit / identify modes, photo/class colors, export dialog.
+  function wireSfmTools() {
+    const orbit = $("toolOrbit"), ident = $("toolIdentify");
+    if (orbit) orbit.addEventListener("click", () => {
+      sfmViewer.setTool("orbit");
+      sfmToolButton("toolOrbit", true);
+      sfmToolButton("toolIdentify", false);
+    });
+    if (ident) ident.addEventListener("click", () => {
+      sfmViewer.setTool("identify");
+      sfmToolButton("toolOrbit", false);
+      sfmToolButton("toolIdentify", true);
+    });
+    const colorSel = $("toolColorMode");
+    if (colorSel) colorSel.addEventListener("change", () => {
+      if (sfmViewer) sfmViewer.setColorMode(colorSel.value);
+    });
+    const sizeSel = $("sfmPointSize");
+    if (sizeSel) sizeSel.addEventListener("input", () => {
+      if (sfmViewer) sfmViewer.setPointSize(parseFloat(sizeSel.value) || 1);
+    });
+    const exp = $("toolExport");
+    if (exp) exp.addEventListener("click", () => {
+      if (!sfmData) { sfmOut.textContent = "Reconstruct a cloud first, then export it."; return; }
+      $("sfmExportInfo").textContent =
+        `${sfmData.count} points loaded${sfmData.dense ? " (dense)" : " (sparse)"}.`;
+      $("sfmExportDlg").hidden = false;
+    });
+    const close = $("sfmExportClose");
+    if (close) close.addEventListener("click", () => { $("sfmExportDlg").hidden = true; });
+    const go = $("sfmExportGo");
+    if (go) go.addEventListener("click", sfmExportDownload);
+    // Drag strips: nothing moves on hover — press and slide along a
+    // strip to drive it, release to stop. Pointer capture keeps the
+    // drag alive if the pointer slips off the thin strip.
+    document.querySelectorAll("#sfmWrap .sfm-zone").forEach((z) => {
+      const move = z.dataset.move;
+      let last = null;
+      z.addEventListener("pointerdown", (e) => {
+        if (!sfmViewer) return;
+        last = [e.clientX, e.clientY];
+        z.setPointerCapture(e.pointerId);
+        z.classList.add("active");
+        e.preventDefault();
+      });
+      z.addEventListener("pointermove", (e) => {
+        if (!sfmViewer || !last) return;
+        const dx = e.clientX - last[0], dy = e.clientY - last[1];
+        last = [e.clientX, e.clientY];
+        sfmViewer.dragZone(move, dx, dy);
+      });
+      const end = () => { last = null; z.classList.remove("active"); };
+      z.addEventListener("pointerup", end);
+      z.addEventListener("pointercancel", end);
+    });
+  }
+
+  // SAM stage box: the per-image boxes that fed 3D label voting,
+  // shown before the 3D view. data.detections maps image name (or
+  // basename) to [{label, box, score}]. Every box is listed with its
+  // score and original-pixel coordinates, plus the raw payload.
+  function renderSfmSam(data, detector) {
+    const boxEl = $("sfmSamBox"), note = $("sfmSamNote"), list = $("sfmSamList");
+    if (!boxEl) return;
+    const dets = (data && data.detections) || {};
+    const names = Object.keys(dets).sort();
+    const total = names.reduce((n, k) => n + (dets[k] || []).length, 0);
+    boxEl.hidden = false;
+    list.innerHTML = "";
+    if (!total) {
+      note.textContent = "No SAM stage ran — concepts were empty and no " +
+        "detections were supplied, so the cloud below is unlabeled.";
+      return;
+    }
+    note.textContent = `${total} box(es) from ${detector} across ` +
+      `${names.length} photo(s) — these voted the 3D point labels. ` +
+      `Boxes are [x1, y1, x2, y2] in original photo pixels.`;
+    const MAX_PER_IMAGE = 8;
+    names.forEach((key) => {
+      const items = dets[key] || [];
+      const base = key.split("/").pop();
+      const li = document.createElement("li");
+      const head = document.createElement("b");
+      head.textContent = `${base} — ${items.length} box(es)`;
+      li.appendChild(head);
+      const sub = document.createElement("ul");
+      items.slice(0, MAX_PER_IMAGE).forEach((d) => {
+        const label = String((d && d.label) || "object");
+        const s = d && typeof d.score === "number" ? ` @ ${d.score.toFixed(2)}` : "";
+        const b = d && Array.isArray(d.box)
+          ? ` [${d.box.slice(0, 4).map((v) => Math.round(Number(v))).join(", ")}]` : "";
+        const row = document.createElement("li");
+        row.textContent = `${label}${s}${b}`;
+        sub.appendChild(row);
+      });
+      if (items.length > MAX_PER_IMAGE) {
+        const more = document.createElement("li");
+        more.textContent = `…and ${items.length - MAX_PER_IMAGE} more (see raw JSON).`;
+        sub.appendChild(more);
+      }
+      li.appendChild(sub);
+      list.appendChild(li);
+    });
+    const raw = document.createElement("li");
+    const det = document.createElement("details");
+    const sum = document.createElement("summary");
+    sum.textContent = "Raw SAM detections JSON";
+    const pre = document.createElement("pre");
+    pre.textContent = JSON.stringify(dets, null, 1);
+    det.appendChild(sum);
+    det.appendChild(pre);
+    raw.appendChild(det);
+    list.appendChild(raw);
+  }
+
+  function sfmExportDownload() {
+    if (!sfmData || !sfmLib) return;
+    const pctEl = document.querySelector('input[name="expPct"]:checked');
+    const fmtEl = document.querySelector('input[name="expFmt"]:checked');
+    const pct = pctEl ? parseFloat(pctEl.value) : 50;
+    const fmt = fmtEl ? fmtEl.value : "xyz";
+    const idx = sfmLib.sampleIndex(sfmData.count, pct);
+    let text, ext, mime;
+    if (fmt === "ply") {
+      text = sfmLib.buildPlyText(sfmData.positions, sfmData.colors, sfmData.labels, idx);
+      ext = "ply"; mime = "text/plain";
+    } else if (fmt === "geojson") {
+      text = sfmLib.buildGeoJson(sfmData.positions, sfmData.colors, sfmData.labels, sfmData.votes, idx);
+      ext = "geojson"; mime = "application/geo+json";
+    } else {
+      text = sfmLib.buildXyzText(sfmData.positions, sfmData.colors, sfmData.labels, idx);
+      ext = "xyz"; mime = "text/plain";
+    }
+    const blob = new Blob([text], { type: mime });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `microgeo-cloud-${idx.length}pts.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+    $("sfmExportDlg").hidden = true;
+    sfmOut.textContent = `Exported ${idx.length} point(s) as ${ext}.`;
+  }
 
   if (sfmBtn) sfmBtn.addEventListener("click", async () => {
     const zf = zipInput.files[0];
     if (!zf) { sfmOut.textContent = "Pick a zip of photos above first."; return; }
     const concepts = setConcepts.value.split(",").map(s => s.trim()).filter(Boolean);
+    const wantDense = $("sfmDense") && $("sfmDense").checked;
     sfmOut.textContent = concepts.length
-      ? "Detecting labels (boxes only, no depth), then reconstructing 3D — matching takes a while on many photos…"
-      : "Reconstructing 3D unlabeled (no detection, no depth)…";
+      ? `Detecting labels (boxes only, no depth), then reconstructing 3D${wantDense ? " + dense stereo (slow)" : ""}…`
+      : `Reconstructing 3D unlabeled${wantDense ? " + dense stereo (slow)" : ""}…`;
     try {
+      const detectorUsed = (setDetector && setDetector.value) || "sam";
       const fd = new FormData();
       fd.append("zipfile", zf);
       fd.append("concepts", JSON.stringify(concepts));
-      fd.append("detector", (setDetector && setDetector.value) || "sam");
+      fd.append("detector", detectorUsed);
+      fd.append("dense", wantDense ? "1" : "0");
       fd.append("use_gpu", ($("sfmCpu") && $("sfmCpu").checked) ? "0" : "1");
       const res = await fetch("/api/sfm", { method: "POST", body: fd });
       const data = await res.json().catch(() => ({}));
@@ -954,35 +1118,46 @@
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${(data.error || "request failed").slice(0, 200)}`);
       if (data.error) throw new Error(data.error);
-      let lib;
       try {
-        lib = await import("./sfm3d.js");
+        sfmLib = sfmLib || await import("./sfm3d.js");
       } catch (e) {
         sfmOut.textContent = "3D data arrived, but the three.js library could not load " +
           "(needs internet for the pinned CDN) — try again online.";
         return;
       }
-      if (!data.ply) throw new Error("the server returned no point cloud");
-      const cloud = lib.parsePly(data.ply);
+      // Dense cloud preferred; sparse fallback when stereo failed.
+      const dense = !!data.dense_ply;
+      const cloud = sfmLib.parsePly(dense ? data.dense_ply : data.ply);
       if (!cloud.count) throw new Error("the server returned an empty point cloud");
-      sfmViews.forEach((v) => v.dispose());
-      sfmViews = [
-        lib.renderCloud($("sfmRaw"), $("sfmRawPopup"), cloud.positions, cloud.colors, data.point_labels || null),
-        lib.renderCloud($("sfmLabeled"), $("sfmLabeledPopup"),
-          cloud.positions, lib.labeledColors(cloud.count, data.point_labels || {}), data.point_labels || null),
-      ];
-      $("sfmRawEmpty").hidden = true;
-      $("sfmLabeledEmpty").hidden = true;
+      const labelsRaw = dense ? (data.dense_labels || {}) : (data.point_labels || {});
+      const labels = [], votes = [];
+      for (let i = 0; i < cloud.count; i++) {
+        const info = labelsRaw[String(i)];
+        labels.push(info ? info.label : null);
+        votes.push(info ? (info.votes || 0) : 0);
+      }
+      sfmData = {
+        positions: cloud.positions, colors: cloud.colors,
+        labels, votes, count: cloud.count, dense,
+      };
+      const viewer = sfmEnsureViewer();
+      viewer.setCloud(cloud.positions, cloud.colors,
+        sfmLib.labeledColors(cloud.count, dense ? (data.dense_labels || {}) : (data.point_labels || {})),
+        labels, votes);
+      $("sfmEmpty").hidden = true;
       const unreg = (data.unregistered || []).length;
       const warns = (data.warnings || []).join(" ");
-      const nLab = Object.keys(data.point_labels || {}).length;
+      const nLab = labels.filter(Boolean).length;
+      const total = dense ? (data.dense_total || 0) : (data.total_points || 0);
       sfmOut.textContent = `Done — ${cloud.count} 3D point(s)` +
-        (data.total_points > cloud.count ? ` (downsampled from ${data.total_points})` : "") +
+        (total > cloud.count ? ` (from ${total}${dense ? " dense" : ""})` : "") +
+        (dense ? " [dense]" : " [sparse]") +
         ` from ${(data.registered || []).length} placed photo(s)` +
         (unreg ? `, ${unreg} photo(s) COLMAP could not place` : "") +
         (concepts.length ? `, ${nLab} labeled point(s) (no depth pass)` : ", unlabeled cloud") +
         (data.gpu_used ? " (GPU)." : ".") +
         (warns ? ` Note: ${warns}` : "");
+      renderSfmSam(data, detectorUsed === "clip" ? "Local CLIP" : "Server SAM 3");
     } catch (e) {
       sfmOut.textContent = `Error: ${e.message}`;
     }
@@ -1046,11 +1221,53 @@
     }
   });
 
+  let depthImage = null; // loaded colorized depth PNG for the overlay
+
   function showDepth(dataUrl) {
     if (!dataUrl) return;
-    depthImg.src = dataUrl;
-    depthImg.hidden = false;
-    depthNote.textContent = "Monocular depth — blue far, red near. Warm areas are closer to the camera.";
+    const img = new Image();
+    img.onload = () => {
+      depthImage = img;
+      drawDepth();
+      depthNote.textContent = "Monocular depth — blue far, red near. " +
+        "Boxes carry label + metres so placement and range read off the colors.";
+    };
+    img.src = dataUrl;
+  }
+
+  // SAM boxes over the depth map: box fractions from the photo canvas
+  // mapped onto the depth canvas, tagged with label + distance, so a
+  // wrongly placed box or a wrong range shows up against the colors.
+  function drawDepth() {
+    const cv = $("depthCanvas");
+    if (!cv) return;
+    if (!depthImage) { cv.hidden = true; return; }
+    cv.width = depthImage.naturalWidth;
+    cv.height = depthImage.naturalHeight;
+    cv.hidden = false;
+    const ctx = cv.getContext("2d");
+    ctx.drawImage(depthImage, 0, 0);
+    if (!boxes.length || !canvas.width || !canvas.height) return;
+    const sx = cv.width / canvas.width, sy = cv.height / canvas.height;
+    const fs = Math.max(11, Math.round(cv.width / 40));
+    ctx.font = `${fs}px system-ui, sans-serif`;
+    boxes.forEach((b, i) => {
+      const hue = (i * 67) % 360;
+      const x1 = b.x1 * sx, y1 = b.y1 * sy;
+      const x2 = b.x2 * sx, y2 = b.y2 * sy;
+      ctx.lineWidth = Math.max(2, Math.round(cv.width / 220));
+      ctx.strokeStyle = `hsl(${hue} 90% 35%)`;
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      const dist = b.geo && typeof b.geo.distance_m === "number"
+        ? ` ${b.geo.distance_m.toFixed(1)}m` : (b.geo_error ? " no depth" : "");
+      const tag = `${b.label}${dist}`;
+      const w = ctx.measureText(tag).width + fs * 0.75;
+      const th = fs * 1.4;
+      ctx.fillStyle = `hsl(${hue} 90% 35%)`;
+      ctx.fillRect(x1, Math.max(0, y1 - th), w, th);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(tag, x1 + fs * 0.35, Math.max(fs, y1 - th * 0.28));
+    });
   }
 
   // Map view: camera fix plus one marker per projected pin, each popup

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>MicroGeo Capture Tool v0.6</title>
+  <title>MicroGeo Capture Tool v0.8</title>
   <meta name="description" content="Test page: upload a photo, send it to SAM 3.1 with object prompts, get bounding boxes back with GPS.">
   <meta name="theme-color" content="#1a2b1f">
   <link rel="manifest" href="manifest.webmanifest">
@@ -22,7 +22,7 @@
 </head>
 <body>
   <header>
-    <h1>MicroGeo Capture Tool <span class="ver">v0.6</span></h1>
+    <h1>MicroGeo Capture Tool <span class="ver">v0.8</span></h1>
     <p class="tagline">Collect delivery-point microgeography: photo → depth → map pin.</p>
     <p id="secureNote"></p>
   </header>
@@ -99,8 +99,8 @@
     <section class="card" id="secResults" data-title="Results">
       <h2>5. Results</h2>
       <ul id="boxList"><li class="hint">No results yet.</li></ul>
-      <h3>Depth (blue far, red near)</h3>
-      <img id="depthImg" alt="Colorized monocular depth map" hidden>
+      <h3>Depth (blue far, red near) + SAM boxes</h3>
+      <canvas id="depthCanvas" hidden></canvas>
       <p class="hint" id="depthNote">No depth map yet — it arrives with the next Send.</p>
       <h3>Map (camera + pins)</h3>
       <div id="map"></div>
@@ -154,29 +154,64 @@
     <section class="card" id="secSfm" data-title="Photo set → 3D">
       <h2>8. Photo set → 3D</h2>
       <p class="hint">Uses the zip picked above. COLMAP geometry only — no depth pass runs. Labels come from the concepts above (leave empty for a fast unlabeled cloud). Needs the COLMAP backend on the server.</p>
+      <label class="row"><input type="checkbox" id="sfmDense" checked> Dense cloud (stereo matching — slower, far denser)</label>
       <label class="row"><input type="checkbox" id="sfmCpu"> Force CPU (skip GPU even when one is visible)</label>
       <button type="button" id="sfmBtn" class="primary">Reconstruct 3D</button>
       <p id="sfmOut" role="status"></p>
-      <div class="sfm-grid">
-        <div class="sfm-cell">
-          <h3>Raw cloud</h3>
-          <div id="sfmRawWrap" class="sfm-wrap">
-            <div id="sfmRaw" class="sfm-view"></div>
-            <p class="hint sfm-empty" id="sfmRawEmpty">No 3D data yet — reconstruct a zip first.</p>
-            <div class="sfm-popup" id="sfmRawPopup" hidden></div>
-          </div>
-          <p class="hint">Drag to orbit, scroll or pinch to zoom. Click a point to identify it.</p>
+      <div id="sfmSamBox" class="sam-box" hidden>
+        <h3>SAM labels (per photo — feeds the 3D point labels)</h3>
+        <p class="hint" id="sfmSamNote"></p>
+        <ul id="sfmSamList"></ul>
+      </div>
+      <div id="sfmWrap" class="sfm-wrap">
+        <div id="sfmToolbar" class="sfm-toolbar" role="toolbar" aria-label="3D tools">
+          <button type="button" id="toolOrbit" class="tool">Orbit</button>
+          <button type="button" id="toolIdentify" class="tool active">Identify</button>
+          <button type="button" id="toolExport" class="tool">Export</button>
+          <label class="tool-slider">Colours
+            <select id="toolColorMode">
+              <option value="photo" selected>RGB</option>
+              <option value="class">Class colours</option>
+              <option value="distance">Distance</option>
+            </select>
+          </label>
+          <label class="tool-slider">Point size
+            <input type="range" id="sfmPointSize" min="0.25" max="4" step="0.25" value="1">
+          </label>
         </div>
-        <div class="sfm-cell">
-          <h3>Labeled cloud</h3>
-          <div id="sfmLabeledWrap" class="sfm-wrap">
-            <div id="sfmLabeled" class="sfm-view"></div>
-            <p class="hint sfm-empty" id="sfmLabeledEmpty">No 3D data yet — reconstruct a zip first.</p>
-            <div class="sfm-popup" id="sfmLabeledPopup" hidden></div>
+        <div id="sfmViewWrap" class="sfm-view-wrap">
+          <div id="sfmView" class="sfm-view sfm-single"></div>
+          <div class="sfm-zone sfm-zone-top" data-move="zoom" title="Zoom: press and slide right to move in, left to move out"><span>zoom</span></div>
+          <div class="sfm-zone sfm-zone-bottom" data-move="pan" title="Pan: press and slide left or right to move across the cloud"><span>pan</span></div>
+          <div class="sfm-zone sfm-zone-left" data-move="roll" title="Roll: press and slide up or down to roll the view"><span>roll</span></div>
+          <div class="sfm-zone sfm-zone-right" data-move="roll" title="Roll: press and slide up or down to roll the view"><span>roll</span></div>
+        </div>
+        <p class="hint sfm-empty" id="sfmEmpty">No 3D data yet — reconstruct a zip first.</p>
+        <div class="sfm-popup" id="sfmPopup" hidden></div>
+        <div id="sfmExportDlg" class="sfm-dlg" hidden>
+          <h4>Export cloud</h4>
+          <p class="hint" id="sfmExportInfo"></p>
+          <div class="sfm-dlg-row" role="radiogroup" aria-label="Points to export">
+            <span>Points:</span>
+            <label><input type="radio" name="expPct" value="10"> 10%</label>
+            <label><input type="radio" name="expPct" value="25"> 25%</label>
+            <label><input type="radio" name="expPct" value="50" checked> 50%</label>
+            <label><input type="radio" name="expPct" value="75"> 75%</label>
+            <label><input type="radio" name="expPct" value="100"> 100%</label>
           </div>
-          <p class="hint">Drag to orbit, scroll or pinch to zoom. Click a point to identify it.</p>
+          <div class="sfm-dlg-row" role="radiogroup" aria-label="Export format">
+            <span>Format:</span>
+            <label><input type="radio" name="expFmt" value="xyz" checked> xyzrgb+class</label>
+            <label><input type="radio" name="expFmt" value="ply"> ply</label>
+            <label><input type="radio" name="expFmt" value="geojson"> GeoJSON</label>
+          </div>
+          <div class="sfm-dlg-row">
+            <button type="button" id="sfmExportGo" class="primary">Download</button>
+            <button type="button" id="sfmExportClose">Close</button>
+          </div>
         </div>
       </div>
+      <p class="hint">Left-drag the picture to orbit, right-drag to pan, scroll to zoom. The zoom (top), pan (bottom) and roll (sides) strips do nothing until you press and slide along one — slide up or down on a side strip to roll. Click a point in Identify mode for its label. Dense cloud needs the COLMAP CLI on the server (<code>sudo apt-get install -y colmap</code>); without it you get a sparser pycolmap cloud.</p>
     </section>
   </main>
 
