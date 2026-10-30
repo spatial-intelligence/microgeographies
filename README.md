@@ -141,6 +141,19 @@ No depth pass runs on this route: detection is boxes-only
 the monocular-depth model. Explicit `detections` win per image;
 concepts fill the rest; empty concepts means an unlabeled cloud.
 
+Photos are normalised for COLMAP before extraction. COLMAP reads
+stored pixels and stored dimensions verbatim and ignores the EXIF
+orientation tag, so portrait phone photos (stored landscape, tagged
+rotated) are physically rotated upright and saved without the tag —
+each photo then gets its own COLMAP camera (forced on both the CLI and
+pycolmap paths), so a landscape frame's width/height and principal
+point can never be applied to a portrait photo. Zip entries sharing a
+filename in different folders are renamed (`name__2.jpg`, …) instead of
+overwriting each other, and the reply gains per-photo `orientations`.
+After parsing, every COLMAP camera is checked against the upright
+photo it claims to describe: a swapped or mismatched width/height adds
+an explicit warning rather than returning a silently warped cloud.
+
 The server unzips to a temp dir and runs COLMAP — CLI preferred
 (feature extraction + exhaustive matching + mapping), pycolmap fallback
 when the binary is missing. GPU choice is automatic: CUDA is used only

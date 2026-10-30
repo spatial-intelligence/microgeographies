@@ -79,7 +79,15 @@ def load_model():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "mock": os.getenv("MOCK_SAM") == "1"}
+    try:
+        import sfm as _sfm
+        sfm_ok = _sfm.sfm_backend_available()
+        sfm_how = ("cli" if _sfm.colmap_binary() else
+                   "pycolmap" if sfm_ok else None)
+    except Exception:
+        sfm_ok, sfm_how = False, None
+    return {"ok": True, "mock": os.getenv("MOCK_SAM") == "1",
+            "sfm_available": sfm_ok, "sfm_backend": sfm_how}
 
 
 @app.post("/api/detect")
@@ -535,16 +543,73 @@ async def sfm(
                 workspace = os.path.join(tmp, "workspace")
                 img_dir = os.path.join(workspace, "images")
                 os.makedirs(img_dir, exist_ok=True)
-                kept = {}  # basename -> PIL (depth-free label source)
+                kept = {}  # COLMAP name -> PIL (depth-free label source)
+                orientations = {}  # COLMAP name -> landscape/portrait/square
+                taken, renamed = set(), []
+                unreadable = 0
+                exif_rotated = 0
+                if len(members) > MAX_BATCH_IMAGES:
+                    warnings.append(
+                        f"zip holds {len(members)} photos: only the first "
+                        f"{MAX_BATCH_IMAGES} (sorted by name) were used")
                 for info in members[:MAX_BATCH_IMAGES]:
                     try:
                         data = zf.read(info.filename)
-                        pil = geo.oriented_image(Image.open(io.BytesIO(data)).convert("RGB"))
+                        opened = Image.open(io.BytesIO(data))
+                        try:
+                            tag = opened.getexif().get(274, 1)
+                        except Exception:
+                            tag = 1
+                        # COLMAP reads stored pixels/dimensions verbatim
+                        # and ignores the EXIF orientation tag, so phone
+                        # portraits (stored landscape, tagged rotated)
+                        # must be physically rotated upright before
+                        # COLMAP sees them, with no tag left to re-apply.
+                        pil = geo.oriented_image(opened.convert("RGB"))
                     except Exception:
+                        unreadable += 1
                         continue
-                    base = os.path.basename(info.filename)
+                    if tag not in (None, 1, "1"):
+                        exif_rotated += 1
+                    # Flattening subfolders must not drop photos: two
+                    # entries sharing a basename get distinct COLMAP
+                    # names instead of overwriting each other.
+                    orig_base = os.path.basename(info.filename)
+                    base = sfm_mod.unique_image_name(orig_base, taken)
+                    if base != orig_base:
+                        renamed.append(f"{info.filename} -> {base}")
                     pil.save(os.path.join(img_dir, base))
                     kept[base] = pil
+                    orientations[base] = sfm_mod.image_orientation(
+                        pil.width, pil.height)
+                if unreadable:
+                    warnings.append(
+                        f"{unreadable} photo(s) in the zip could not be "
+                        "read and were skipped (HEIC photos, for example, "
+                        "need converting to JPEG first)")
+                if renamed:
+                    warnings.append(
+                        f"{len(renamed)} photo(s) shared the filename of "
+                        "an earlier photo and were renamed so none were "
+                        f"dropped: {'; '.join(renamed[:3])}")
+                if exif_rotated:
+                    warnings.append(
+                        f"{exif_rotated} photo(s) carried an EXIF "
+                        "orientation tag and were rotated upright for "
+                        "COLMAP (it reads stored pixels and ignores "
+                        "that tag, so unrotated portraits reconstruct "
+                        "sideways with swapped width/height)")
+                _ori_counts = {}
+                for _o in orientations.values():
+                    _ori_counts[_o] = _ori_counts.get(_o, 0) + 1
+                if _ori_counts.get("landscape") and (
+                        _ori_counts.get("portrait")):
+                    warnings.append(
+                        f"mixed orientations: {_ori_counts['landscape']} "
+                        f"landscape and {_ori_counts['portrait']} "
+                        "portrait photo(s) — each photo gets its own "
+                        "COLMAP camera, so both reconstruct together "
+                        "in their upright frames")
                 # Server-side labels without any depth pass: explicit
                 # detections win per image, concepts fill the rest.
                 if names_in:
@@ -575,6 +640,10 @@ async def sfm(
                 cameras, points, colors, parse_warnings = sfm_mod.parse_model(
                     model_dir)
                 warnings.extend(parse_warnings)
+                warnings.extend(sfm_mod.camera_dimension_warnings(
+                    cameras,
+                    {base: (pil.width, pil.height)
+                     for base, pil in kept.items()}))
                 total = len(points)
                 if total == 0:
                     warnings.append("COLMAP returned an empty model (no 3D "
@@ -635,6 +704,9 @@ async def sfm(
                                    for base, pil in kept.items()},
                     "image_sizes": {base: [pil.width, pil.height]
                                     for base, pil in kept.items()},
+                    # Upright orientation per photo (landscape/portrait/
+                    # square), so the page can badge mixed sets.
+                    "orientations": orientations,
                     "cameras": cameras,
                     "point_labels": point_labels,
                     "registered": sorted(registered),

@@ -144,7 +144,7 @@ export function buildGeoJson(pos, col, labels, votes, idx) {
 // axis from vertical slides (see dragZone). Left-drag orbits,
 // right-drag pans. Point size scales with setPointSize.
 // Returns a handle with setCloud / setTool / setColorMode /
-// setPointSize / dragZone / dispose.
+// setPointSize / resetView / dragZone / dispose.
 export function createViewer(container, popup) {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -397,10 +397,17 @@ export function createViewer(container, popup) {
     renderer.render(scene, camera);
   })();
 
+  function resetView() {
+    if (!points) return;
+    popup.hidden = true;
+    frame();
+  }
+
   return {
     setCloud,
     setColorMode,
     setPointSize,
+    resetView,
     setTool(m) { tool = m; if (m !== "identify") popup.hidden = true; },
     dragZone,
     dispose() {

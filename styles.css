@@ -110,3 +110,28 @@ body.wide .sfm-single { height: 560px; }
 .sfm-dlg h4 { margin: 0 0 4px; }
 .sfm-dlg-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
 @media (max-width: 560px) { .sfm-grid { grid-template-columns: 1fr; } }
+/* Focus and state visibility (keyboard users, status colours). */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+#sfmBackend.ok { color: var(--accent); font-weight: 600; opacity: 1; }
+#sfmBackend.bad { color: #b00020; font-weight: 600; opacity: 1; }
+/* Reconstruction summary + notes, shown after a run. */
+.sfm-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 10px 0 4px; }
+.sfm-stats .stat { border: 1px solid #8886; border-radius: 6px; padding: 6px 10px; }
+.sfm-stats .stat-k { display: block; font-size: 0.75rem; opacity: 0.75; }
+.sfm-stats .stat-v { display: block; font-size: 0.95rem; font-weight: 600; overflow-wrap: anywhere; }
+.warn-list { margin: 8px 0; padding: 8px 12px 8px 28px; font-size: 0.85rem;
+  border: 1px solid #8886; border-radius: 6px; background: #b5890014; }
+.warn-list li { margin: 2px 0; }
+/* Per-photo placed / orientation caption in the SAM photo grid. */
+.sam-cell figcaption.not-placed { color: #b00020; font-weight: 600; }
+/* Toolbar and export dialog follow the colour scheme. */
+.sfm-toolbar .tool { color: #14201a; }
+@media (prefers-color-scheme: dark) {
+  .sfm-toolbar .tool { background: #242d28; color: #f2f5f1; border-color: #888; }
+  .sfm-toolbar .tool.active { background: #f2f5f1; color: #14201a; border-color: #f2f5f1; }
+  .sfm-dlg { background: #1c2420; color: #f2f5f1; border-color: #888; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; scroll-behavior: auto !important; }
+}

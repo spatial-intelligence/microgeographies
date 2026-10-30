@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>MicroGeo Capture Tool v0.10</title>
+  <title>MicroGeo Capture Tool v0.11</title>
   <meta name="description" content="Test page: upload a photo, send it to SAM 3.1 with object prompts, get bounding boxes back with GPS.">
   <meta name="theme-color" content="#1a2b1f">
   <link rel="manifest" href="manifest.webmanifest">
@@ -22,7 +22,7 @@
 </head>
 <body>
   <header>
-    <h1>MicroGeo Capture Tool <span class="ver">v0.10</span></h1>
+    <h1>MicroGeo Capture Tool <span class="ver">v0.11</span></h1>
     <p class="tagline">Collect delivery-point microgeography: photo → depth → map pin.</p>
     <p id="secureNote"></p>
   </header>
@@ -154,12 +154,16 @@
     <section class="card" id="secSfm" data-title="Photo set → 3D">
       <h2>8. Photo set → 3D</h2>
       <p class="hint">Uses the zip picked above. COLMAP geometry only — no depth pass runs. Labels come from the concepts above (leave empty for a fast unlabeled cloud). Needs the COLMAP backend on the server.</p>
+      <p class="hint" id="sfmBackend">Checking whether this server can run COLMAP…</p>
+      <p class="hint">Mixed landscape and portrait photos are fine: portrait phone photos are rotated upright automatically before COLMAP sees them. For a good cloud use 8+ photos of the same subject with 60–80% overlap as you move; blank walls, glass and sky match poorly.</p>
       <label class="row"><input type="checkbox" id="sfmDense" checked> Dense cloud (stereo matching — slower, far denser)</label>
       <label class="row"><input type="checkbox" id="sfmCpu"> Force CPU (skip GPU even when one is visible)</label>
       <button type="button" id="sfmBtn" class="primary">Reconstruct 3D</button>
       <p id="sfmOut" role="status"></p>
       <progress id="sfmProg" max="100" value="0" hidden></progress>
       <pre id="sfmLog" class="sfm-log" hidden></pre>
+      <div id="sfmStats" class="sfm-stats" hidden></div>
+      <ul id="sfmWarn" class="warn-list" hidden></ul>
       <div id="sfmSamBox" class="sam-box" hidden>
         <h3>SAM labels (per photo — feeds the 3D point labels)</h3>
         <p class="hint" id="sfmSamNote"></p>
@@ -171,8 +175,9 @@
       </div>
       <div id="sfmWrap" class="sfm-wrap">
         <div id="sfmToolbar" class="sfm-toolbar" role="toolbar" aria-label="3D tools">
-          <button type="button" id="toolOrbit" class="tool">Orbit</button>
-          <button type="button" id="toolIdentify" class="tool active">Identify</button>
+          <button type="button" id="toolOrbit" class="tool" aria-pressed="false">Orbit</button>
+          <button type="button" id="toolIdentify" class="tool active" aria-pressed="true">Identify</button>
+          <button type="button" id="toolReset" class="tool">Reset view</button>
           <button type="button" id="toolExport" class="tool">Export</button>
           <label class="tool-slider">Colours
             <select id="toolColorMode">
@@ -181,8 +186,8 @@
               <option value="distance">Distance</option>
             </select>
           </label>
-          <label class="tool-slider">Point size
-            <input type="range" id="sfmPointSize" min="0.25" max="4" step="0.25" value="1">
+          <label class="tool-slider">Point size <span id="sfmPointSizeVal">1×</span>
+            <input type="range" id="sfmPointSize" min="0.25" max="4" step="0.25" value="1" aria-label="Point size">
           </label>
         </div>
         <div id="sfmViewWrap" class="sfm-view-wrap">

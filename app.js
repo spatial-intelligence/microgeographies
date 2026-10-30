@@ -945,7 +945,77 @@
 
   function sfmToolButton(id, active) {
     const el = $(id);
-    if (el) el.classList.toggle("active", !!active);
+    if (el) {
+      el.classList.toggle("active", !!active);
+      el.setAttribute("aria-pressed", active ? "true" : "false");
+    }
+  }
+
+  // COLMAP availability, asked once on load so a missing backend is
+  // visible before a long upload rather than after it. Never fatal:
+  // on a static host without the API this just says so.
+  (function checkSfmBackend() {
+    const el = $("sfmBackend");
+    if (!el || !window.fetch) return;
+    fetch("/api/health").then((r) => (r.ok ? r.json() : null)).then((h) => {
+      if (!h) { el.textContent = "COLMAP status unknown (no backend reply)."; return; }
+      if (h.sfm_available) {
+        el.textContent = `COLMAP ready on this server (${h.sfm_backend === "cli" ? "COLMAP program" : "pycolmap"}).`;
+        el.classList.add("ok");
+      } else {
+        el.textContent = "COLMAP is not installed on this server, so Reconstruct 3D will report it is unavailable. Batch pins above still work.";
+        el.classList.add("bad");
+      }
+    }).catch(() => {
+      el.textContent = "COLMAP status unknown (backend unreachable from here).";
+    });
+  })();
+
+  function renderSfmStats(data, cloudCount, dense, nLab) {
+    const stats = $("sfmStats"), warn = $("sfmWarn");
+    if (stats) {
+      const placed = (data.registered || []).length;
+      const totalPhotos = placed + (data.unregistered || []).length;
+      const ori = data.orientations || {};
+      const counts = {};
+      Object.values(ori).forEach((o) => { counts[o] = (counts[o] || 0) + 1; });
+      const oriText = ["landscape", "portrait", "square"]
+        .filter((k) => counts[k]).map((k) => `${counts[k]} ${k}`).join(", ") || "—";
+      const total = dense ? (data.dense_total || 0) : (data.total_points || 0);
+      const items = [
+        ["Photos placed", `${placed} / ${totalPhotos}`],
+        ["Points shown", total > cloudCount ? `${cloudCount} of ${total}` : String(cloudCount)],
+        ["Cloud", dense ? "Dense" : "Sparse"],
+        ["Labelled points", String(nLab)],
+        ["Orientations", oriText],
+        ["GPU", data.gpu_used ? "Yes" : "No (CPU)"],
+      ];
+      stats.innerHTML = "";
+      items.forEach(([k, v]) => {
+        const cell = document.createElement("div");
+        cell.className = "stat";
+        const key = document.createElement("span");
+        key.className = "stat-k";
+        key.textContent = k;
+        const val = document.createElement("span");
+        val.className = "stat-v";
+        val.textContent = v;
+        cell.appendChild(key);
+        cell.appendChild(val);
+        stats.appendChild(cell);
+      });
+      stats.hidden = false;
+    }
+    if (warn) {
+      const list = data.warnings || [];
+      warn.innerHTML = "";
+      list.forEach((w) => {
+        const li = document.createElement("li");
+        li.textContent = String(w);
+        warn.appendChild(li);
+      });
+      warn.hidden = list.length === 0;
+    }
   }
 
   // Toolbar: orbit / identify modes, photo/class colors, export dialog.
@@ -967,7 +1037,14 @@
     });
     const sizeSel = $("sfmPointSize");
     if (sizeSel) sizeSel.addEventListener("input", () => {
-      if (sfmViewer) sfmViewer.setPointSize(parseFloat(sizeSel.value) || 1);
+      const v = parseFloat(sizeSel.value) || 1;
+      const val = $("sfmPointSizeVal");
+      if (val) val.textContent = `${v}×`;
+      if (sfmViewer) sfmViewer.setPointSize(v);
+    });
+    const reset = $("toolReset");
+    if (reset) reset.addEventListener("click", () => {
+      if (sfmViewer) sfmViewer.resetView();
     });
     const exp = $("toolExport");
     if (exp) exp.addEventListener("click", () => {
@@ -1073,6 +1150,8 @@
     if (!wrap || !grid) return;
     const thumbs = (data && data.thumbnails) || {};
     const sizes = (data && data.image_sizes) || {};
+    const orient = (data && data.orientations) || {};
+    const placed = new Set((data && data.registered) || []);
     const dets = (data && data.detections) || {};
     const byBase = {};
     Object.keys(dets).forEach((k) => {
@@ -1089,7 +1168,12 @@
       cell.className = "sam-cell";
       const cv = document.createElement("canvas");
       const cap = document.createElement("figcaption");
-      cap.textContent = `${base} — ${items.length} box(es)`;
+      const sz = sizes[base];
+      const meta = [orient[base] || null,
+        sz ? `${sz[0]}×${sz[1]}` : null,
+        placed.has(base) ? "placed" : "not placed"].filter(Boolean).join(" · ");
+      cap.textContent = `${base} — ${items.length} box(es) (${meta})`;
+      cap.className = placed.has(base) ? "placed" : "not-placed";
       cell.appendChild(cv);
       cell.appendChild(cap);
       grid.appendChild(cell);
@@ -1185,6 +1269,8 @@
     };
     if ($("sfmSamBox")) $("sfmSamBox").hidden = true;
     if ($("sfmImgWrap")) $("sfmImgWrap").hidden = true;
+    if ($("sfmStats")) $("sfmStats").hidden = true;
+    if ($("sfmWarn")) $("sfmWarn").hidden = true;
     sfmBtn.disabled = true;
     paintProgress();
     try {
@@ -1268,17 +1354,17 @@
         labels, votes);
       $("sfmEmpty").hidden = true;
       const unreg = (data.unregistered || []).length;
-      const warns = (data.warnings || []).join(" ");
       const nLab = labels.filter(Boolean).length;
       const total = dense ? (data.dense_total || 0) : (data.total_points || 0);
       sfmOut.textContent = `Done — ${cloud.count} 3D point(s)` +
         (total > cloud.count ? ` (from ${total}${dense ? " dense" : ""})` : "") +
         (dense ? " [dense]" : " [sparse]") +
         ` from ${(data.registered || []).length} placed photo(s)` +
-        (unreg ? `, ${unreg} photo(s) COLMAP could not place` : "") +
+        (unreg ? `, ${unreg} photo(s) COLMAP could not place — they are named in the photo grid below` : "") +
         (concepts.length ? `, ${nLab} labeled point(s) (no depth pass)` : ", unlabeled cloud") +
         (data.gpu_used ? " (GPU)." : ".") +
-        (warns ? ` Note: ${warns}` : "");
+        ((data.warnings || []).length ? " See notes below." : "");
+      renderSfmStats(data, cloud.count, dense, nLab);
       renderSfmSam(data, detectorUsed === "clip" ? "Local CLIP" : "Server SAM 3");
       renderSfmSamImages(data);
     } catch (e) {

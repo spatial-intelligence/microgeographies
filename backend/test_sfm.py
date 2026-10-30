@@ -985,6 +985,186 @@ def test_sfm_failure_response_keeps_backend_warnings():
         sfm.colmap_binary, sfm.reconstruct = old_bin, old_recon
 
 
+def test_image_orientation_labels():
+    assert sfm.image_orientation(640, 480) == "landscape"
+    assert sfm.image_orientation(480, 640) == "portrait"
+    assert sfm.image_orientation(500, 500) == "square"
+
+
+def test_unique_image_name_keeps_first_and_renames_rest():
+    taken = set()
+    assert sfm.unique_image_name("a.jpg", taken) == "a.jpg"
+    assert sfm.unique_image_name("a.jpg", taken) == "a__2.jpg"
+    assert sfm.unique_image_name("a.jpg", taken) == "a__3.jpg"
+    assert sfm.unique_image_name("b.png", taken) == "b.png"
+    assert taken == {"a.jpg", "a__2.jpg", "a__3.jpg", "b.png"}
+
+
+def test_camera_dimension_warnings():
+    sizes = {"land.jpg": (640, 480), "port.jpg": (480, 640)}
+    ok = [{"image": "land.jpg", "width": 640, "height": 480},
+          {"image": "port.jpg", "width": 480, "height": 640}]
+    assert sfm.camera_dimension_warnings(ok, sizes) == []
+    swapped = [{"image": "port.jpg", "width": 640, "height": 480}]
+    warns = sfm.camera_dimension_warnings(swapped, sizes)
+    assert len(warns) == 1 and "port.jpg" in warns[0], warns
+    assert "480x640" in warns[0] and "640x480" in warns[0], warns
+    wrong = [{"image": "land.jpg", "width": 320, "height": 240}]
+    assert len(sfm.camera_dimension_warnings(wrong, sizes)) == 1
+
+
+def test_camera_per_image_args_both_spellings():
+    tmp = tempfile.mkdtemp(prefix="sfm-camargs-")
+    new = os.path.join(tmp, "colmap-new")
+    with open(new, "w") as fh:
+        fh.write("#!/bin/sh\necho '--ImageReader.single_camera arg (=0)'\n"
+                 "echo '--ImageReader.single_camera_per_image arg (=0)'\n")
+    old = os.path.join(tmp, "colmap-old")
+    with open(old, "w") as fh:
+        fh.write("#!/bin/sh\necho '--ImageReader.single_camera arg (=0)'\n")
+    os.chmod(new, 0o755)
+    os.chmod(old, 0o755)
+    assert sfm._camera_per_image_args(new) == [
+        "--ImageReader.single_camera_per_image", "1"]
+    assert sfm._camera_per_image_args(old) == [
+        "--ImageReader.single_camera", "0"]
+    # Missing binary must not raise: safe per-image spelling.
+    assert sfm._camera_per_image_args(
+        os.path.join(tmp, "missing")) == [
+        "--ImageReader.single_camera", "0"]
+
+
+def test_pycolmap_forces_per_image_camera_mode():
+    import sys
+    import types
+    calls = {}
+    fake = _fake_pycolmap_with_gpu_check(True, calls)
+
+    class _CameraMode:
+        AUTO, SINGLE, PER_FOLDER, PER_IMAGE = (
+            "auto", "single", "per_folder", "per_image")
+    fake.CameraMode = _CameraMode
+    old = sys.modules.get("pycolmap")
+    sys.modules["pycolmap"] = fake
+    ws = tempfile.mkdtemp(prefix="sfm-perimage-")
+    try:
+        sfm.run_colmap_pycolmap("/imgs", ws, False)
+    finally:
+        if old is None:
+            del sys.modules["pycolmap"]
+        else:
+            sys.modules["pycolmap"] = old
+    assert calls["extract"].get("camera_mode") == "per_image", calls
+
+
+def test_sfm_zip_duplicate_basenames_and_portrait_upright():
+    """Photos in subfolders sharing a filename must all reach COLMAP,
+    and EXIF-portrait photos must arrive upright (480x640, not 640x480)."""
+    import io
+    import json
+    import zipfile as _zip
+    from fastapi.testclient import TestClient  # noqa: E402
+    from PIL import Image  # noqa: E402
+    import server  # noqa: E402
+
+    captured = {}
+    old_bin, old_recon = sfm.colmap_binary, sfm.reconstruct
+    sfm.colmap_binary = lambda: "colmap"
+
+    def _fake_reconstruct(img_dir, workspace_dir, gpu_used, emit=None):
+        captured["sizes"] = {
+            fn: Image.open(os.path.join(img_dir, fn)).size
+            for fn in sorted(os.listdir(img_dir))}
+        model = os.path.join(workspace_dir, "sparse", "0")
+        os.makedirs(model, exist_ok=True)
+        _write(os.path.join(model, "cameras.txt"),
+               "1 SIMPLE_PINHOLE 64 48 50 32 24\n")
+        _write(os.path.join(model, "images.txt"),
+               "1 1 0 0 0 0 0 0 1 land.jpg\n\n")
+        _write(os.path.join(model, "points3D.txt"),
+               "1 0.0 0.0 5.0 200 100 50 1.0 0 0\n")
+        return model, []
+    sfm.reconstruct = _fake_reconstruct
+
+    def _jpeg(w, h, orient):
+        im = Image.new("RGB", (w, h), (10, 100, 200))
+        ex = Image.Exif()
+        ex[274] = orient
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", exif=ex)
+        return buf.getvalue()
+    try:
+        c = TestClient(server.app, raise_server_exceptions=False)
+        zb = io.BytesIO()
+        with _zip.ZipFile(zb, "w") as zf:
+            # Same basename in two folders: one landscape, one portrait.
+            zf.writestr("wide/dup.jpg", _jpeg(64, 48, 1))
+            zf.writestr("tall/dup.jpg", _jpeg(64, 48, 6))
+            zf.writestr("land.jpg", _jpeg(64, 48, 1))
+        r = c.post("/api/sfm",
+                   files={"zipfile": ("s.zip", zb.getvalue(),
+                                       "application/zip")},
+                   data={"use_gpu": "0"})
+        body = _sfm_final_data(r)
+        assert "error" not in body, body
+        sizes = captured["sizes"]
+        assert len(sizes) == 3, sizes  # nothing silently overwritten
+        assert sorted(sizes.values()) == [(48, 64), (64, 48), (64, 48)], sizes
+        # Members sort by zip path, so tall/dup.jpg keeps the plain name.
+        assert body["orientations"]["dup.jpg"] == "portrait", body
+        assert body["orientations"]["dup__2.jpg"] == "landscape", body
+        assert any("rotated upright" in w for w in body["warnings"]), body
+        assert any("shared the filename" in w for w in body["warnings"]), body
+        assert any("mixed" in w for w in body["warnings"]), body
+    finally:
+        sfm.colmap_binary, sfm.reconstruct = old_bin, old_recon
+
+
+def test_sfm_swapped_camera_dimensions_warn():
+    """A COLMAP camera whose W/H are the transpose of the upright photo
+    (the landscape/portrait swap) must be reported, not silently used."""
+    import io
+    import zipfile as _zip
+    from fastapi.testclient import TestClient  # noqa: E402
+    from PIL import Image  # noqa: E402
+    import server  # noqa: E402
+
+    old_bin, old_recon = sfm.colmap_binary, sfm.reconstruct
+    sfm.colmap_binary = lambda: "colmap"
+
+    def _fake_reconstruct(img_dir, workspace_dir, gpu_used, emit=None):
+        model = os.path.join(workspace_dir, "sparse", "0")
+        os.makedirs(model, exist_ok=True)
+        # Photo on disk is portrait 48x64; camera claims 64x48 (swapped).
+        _write(os.path.join(model, "cameras.txt"),
+               "1 SIMPLE_PINHOLE 64 48 50 32 24\n")
+        _write(os.path.join(model, "images.txt"),
+               "1 1 0 0 0 0 0 0 1 port.jpg\n\n")
+        _write(os.path.join(model, "points3D.txt"),
+               "1 0.0 0.0 5.0 200 100 50 1.0 0 0\n")
+        return model, []
+    sfm.reconstruct = _fake_reconstruct
+    try:
+        c = TestClient(server.app, raise_server_exceptions=False)
+        zb = io.BytesIO()
+        with _zip.ZipFile(zb, "w") as zf:
+            for name in ("port.jpg", "land.jpg"):
+                buf = io.BytesIO()
+                im = Image.new("RGB", (48, 64), (10, 100, 200))
+                im.save(buf, "JPEG")
+                zf.writestr(name, buf.getvalue())
+        r = c.post("/api/sfm",
+                   files={"zipfile": ("s.zip", zb.getvalue(),
+                                       "application/zip")},
+                   data={"use_gpu": "0"})
+        body = _sfm_final_data(r)
+        assert "error" not in body, body
+        assert any("port.jpg" in w and "swapped" in w
+                   for w in body["warnings"]), body
+    finally:
+        sfm.colmap_binary, sfm.reconstruct = old_bin, old_recon
+
+
 if __name__ == "__main__":
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):

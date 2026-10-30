@@ -506,6 +506,104 @@ def _ensure_text_model(binary, model_dir, warnings, runner=None):
         "walls, glass, and sky do not match.")
 
 
+def image_orientation(width, height):
+    """Orientation label for pixel dimensions: landscape/portrait/square."""
+    if width > height:
+        return "landscape"
+    if height > width:
+        return "portrait"
+    return "square"
+
+
+def unique_image_name(basename, taken):
+    """First-use name for `basename`, else a `__2`/`__3` variant.
+
+    Zip archives may hold the same filename in different folders (for
+    example `wide/dup.jpg` and `tall/dup.jpg`). Writing both to one flat
+    COLMAP image directory under the shared basename would silently
+    overwrite one photo with the other, so later copies are renamed
+    instead of dropped. `taken` is updated with the returned name.
+    """
+    name = str(basename)
+    if name not in taken:
+        taken.add(name)
+        return name
+    stem, dot, ext = name.rpartition(".")
+    n = 2
+    while True:
+        cand = f"{stem}__{n}.{ext}" if dot else f"{name}__{n}"
+        if cand not in taken:
+            taken.add(cand)
+            return cand
+        n += 1
+
+
+def camera_dimension_warnings(cameras, image_sizes):
+    """Warnings for COLMAP cameras that disagree with the upright photos.
+
+    `cameras` are parse_model entries; `image_sizes` maps image name to
+    (width, height) of the photo COLMAP was actually given. COLMAP reads
+    stored pixels and stored dimensions verbatim and ignores the EXIF
+    orientation tag, so a camera claiming the transpose of the upright
+    photo (640x480 for a 480x640 portrait, say) means the point cloud was
+    built in the wrong frame: report it instead of returning a silently
+    warped cloud. Matching cameras and unknown images stay silent.
+    """
+    warnings = []
+    sizes = image_sizes or {}
+    for cam in cameras or []:
+        name = cam.get("image")
+        size = sizes.get(name) or sizes.get(os.path.basename(str(name)))
+        if size is None:
+            continue
+        w, h = int(size[0]), int(size[1])
+        cw, ch = int(cam.get("width", 0)), int(cam.get("height", 0))
+        if (cw, ch) == (w, h):
+            continue
+        if (cw, ch) == (h, w) and w != h:
+            warnings.append(
+                f"camera for {name} is {cw}x{ch} but the upright photo is "
+                f"{w}x{h}: width/height look swapped (landscape/portrait), "
+                "so this reconstruction is in the wrong frame — the photo "
+                "was likely fed to COLMAP without applying its EXIF "
+                "orientation")
+        else:
+            warnings.append(
+                f"camera for {name} is {cw}x{ch} but the upright photo is "
+                f"{w}x{h}: camera size does not match the photo, "
+                "so points from this view may be misplaced")
+    return warnings
+
+
+def _feature_extractor_help(binary):
+    """feature_extractor --help text (stdout+stderr), "" when unprobeable."""
+    try:
+        proc = subprocess.run(
+            [binary, "feature_extractor", "--help"],
+            capture_output=True, text=True, timeout=60)
+        return (proc.stdout or "") + (proc.stderr or "")
+    except Exception:
+        return ""
+
+
+def _camera_per_image_args(binary):
+    """Extractor args forcing one camera per image.
+
+    A shared camera carries one width/height and principal point for
+    every photo. In a mixed landscape/portrait set that applies one
+    orientation's frame to the other and warps the cloud, so each photo
+    must get its own camera. COLMAP 4.x spells this
+    --ImageReader.single_camera_per_image; 3.x only has
+    --ImageReader.single_camera (0 = per image). Probed from --help like
+    the GPU flags; the 3.x spelling is the safe fallback because it
+    exists in both generations.
+    """
+    out = _feature_extractor_help(binary)
+    if "ImageReader.single_camera_per_image" in out:
+        return ["--ImageReader.single_camera_per_image", "1"]
+    return ["--ImageReader.single_camera", "0"]
+
+
 def _sift_gpu_flags(binary, gpu_used):
     """(extract_args, match_args) GPU flags for this COLMAP version.
 
@@ -514,13 +612,7 @@ def _sift_gpu_flags(binary, gpu_used):
     --FeatureMatching (plus gpu_index). Probed from --help so either
     binary works without version pinning.
     """
-    try:
-        proc = subprocess.run(
-            [binary, "feature_extractor", "--help"],
-            capture_output=True, text=True, timeout=60)
-        out = (proc.stdout or "") + (proc.stderr or "")
-    except Exception:
-        out = ""
+    out = _feature_extractor_help(binary)
     flag = "1" if gpu_used else "0"
     if "FeatureExtraction.use_gpu" in out:
         extract = ["--FeatureExtraction.use_gpu", flag]
@@ -552,6 +644,7 @@ def run_colmap_cli(images_dir, workspace_dir, gpu_used, emit=None):
     try:
         _run([binary, "feature_extractor",
               "--database_path", db_path, "--image_path", images_dir,
+              *_camera_per_image_args(binary),
               *extract_gpu], warnings, emit)
         _run([binary, "exhaustive_matcher",
               "--database_path", db_path,
@@ -651,14 +744,21 @@ def run_colmap_pycolmap(images_dir, workspace_dir, gpu_used, emit=None):
         raise RuntimeError("installed pycolmap lacks extract_features / "
                            "match_exhaustive / incremental_mapping")
     # Newer pycolmap speaks extraction_options + device; older ones
-    # take sift_options. Prefer the new spelling when present.
+    # take sift_options. Prefer the new spelling when present. Either
+    # way every photo gets its own camera (PER_IMAGE): a camera shared
+    # across a mixed landscape/portrait set would impose one
+    # orientation's width/height and principal point on the other.
+    cam_mode = {}
+    modes = getattr(pycolmap, "CameraMode", None)
+    if modes is not None and hasattr(modes, "PER_IMAGE"):
+        cam_mode = {"camera_mode": modes.PER_IMAGE}
     try:
         _note(emit, "extracting SIFT features "
                     f"({'GPU' if gpu_used else 'CPU'})…")
         if hasattr(pycolmap, "FeatureExtractionOptions"):
             fe_opts, gpu_effective = _validated_extraction_options(
                 pycolmap, gpu_used, warnings)
-            kwargs = {"extraction_options": fe_opts}
+            kwargs = {"extraction_options": fe_opts, **cam_mode}
             dev = getattr(pycolmap, "Device", None)
             if dev is not None:
                 for attr in (("cuda", True), ("cpu", False)):
@@ -674,8 +774,8 @@ def run_colmap_pycolmap(images_dir, workspace_dir, gpu_used, emit=None):
                     sift_opts.use_gpu = bool(gpu_used)
             except Exception:
                 sift_opts = None
-            kwargs = ({"sift_options": sift_opts}
-                      if sift_opts is not None else {})
+            kwargs = ({**cam_mode, "sift_options": sift_opts}
+                      if sift_opts is not None else dict(cam_mode))
             extract(db_path, images_dir, **kwargs)
         _note(emit, "exhaustive matching…")
         match(db_path)
