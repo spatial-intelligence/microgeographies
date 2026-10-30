@@ -4,3 +4,5 @@ node_modules/
 *.key
 .DS_Store
 .venv
+.venv-win/
+.pytest_cache/

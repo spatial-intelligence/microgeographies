@@ -155,7 +155,7 @@ def parse_concepts(concepts):
     return [n for n in names if n][:10]
 
 
-def detect_concepts_no_depth(pil_by_name, concepts, detector="sam"):
+def detect_concepts_no_depth(pil_by_name, concepts, detector="sam", api_token=""):
     """Boxes for many images with no depth pass (SfM label source).
 
     Runs run_detections per image and returns (dets, errors): dets maps
@@ -167,7 +167,11 @@ def detect_concepts_no_depth(pil_by_name, concepts, detector="sam"):
     dets, errors, seen = {}, [], set()
     for name, pil in (pil_by_name or {}).items():
         try:
-            boxes = run_detections(pil, concepts, detector=detector or "sam")
+            if detector == "api":
+                import meta
+                boxes = meta.detect(pil, concepts, api_token)
+            else:
+                boxes = run_detections(pil, concepts, detector=detector or "sam")
         except Exception as e:
             note = f"{os.path.basename(name)}: {e}".strip()[:160]
             if note not in seen:
@@ -370,6 +374,7 @@ async def batch(
     detector: str = Form(default="sam"),
     merge_radius_m: str = Form(default="8"),
     sim_min: str = Form(default="0.75"),
+    sam_token: str = Form(default=""),
 ):
     """Batch-process a zip of photos; merge repeats into shared features.
 
@@ -423,7 +428,15 @@ async def batch(
         w, h = pil.size
         location, gps_source = geo.resolve_location(lat, lon, pil, prefer=prefer or "exif")
         hdg, hdg_source = geo.resolve_heading(heading, pil)
-        dets = mg.dedupe_same_image(run_detections(pil, names, detector=detector or "sam"))
+        if detector == "api":
+            import meta
+            try:
+                found = meta.detect(pil, names, sam_token)
+            except Exception as exc:
+                return {"error": str(exc), "images": [], "merged": None}
+        else:
+            found = run_detections(pil, names, detector=detector or "sam")
+        dets = mg.dedupe_same_image(found)
         grid, depth_error = get_depth(pil, model_id=model or None)
         dets = project_boxes(pil, dets, location,
                              "" if hdg is None else str(hdg),
@@ -462,6 +475,8 @@ async def sfm(
     detector: str = Form(default="sam"),
     dense: str = Form(default="0"),
     use_gpu: str = Form(default="1"),
+    sam_token: str = Form(default=""),
+    label_objects: str = Form(default="0"),
 ):
     """Reconstruct a zip of photos with COLMAP and label the 3D points.
 
@@ -474,7 +489,9 @@ async def sfm(
     ("sam" | "clip", server-side only), `dense` ("1" to also run
     COLMAP multi-view stereo + fusion after the sparse model),
     `use_gpu` ("1" default: use CUDA only when actually available;
-    "0" forces CPU).
+    "0" forces CPU). `label_objects` defaults to "0": no detector,
+    API calls or label voting, even if concepts/detections are supplied.
+    Set it to "1" to label disposable image copies after geometry finishes.
 
     No monocular-depth pass runs on this route: labels come from
     boxes only, and geometry comes from COLMAP. GPU choice is
@@ -519,8 +536,9 @@ async def sfm(
                      "to enable /api/sfm",
             "cameras": [], "gpu_used": gpu_used, "warnings": warnings})
 
+    want_labels = str(label_objects).strip().lower() in ("1", "true", "yes", "on")
     try:
-        dets = json.loads(detections) if (detections or "").strip() else {}
+        dets = json.loads(detections) if want_labels and (detections or "").strip() else {}
     except json.JSONDecodeError:
         dets = {}
         warnings.append("detections is not valid JSON: label voting skipped")
@@ -534,7 +552,7 @@ async def sfm(
         forwards log lines to the client (see below)."""
         nonlocal dets  # explicit detections merge with auto ones below
         try:
-            names_in = parse_concepts(concepts)
+            names_in = parse_concepts(concepts) if want_labels else []
             want_dense = str(dense or "").strip().lower() not in (
                 "", "0", "false", "no", "off")
             with tempfile.TemporaryDirectory(prefix="sfm-") as tmp:
@@ -544,7 +562,9 @@ async def sfm(
                 img_dir = os.path.join(workspace, "images")
                 os.makedirs(img_dir, exist_ok=True)
                 kept = {}  # COLMAP name -> PIL (depth-free label source)
+                clean_thumbnails = {}  # previews read from the actual COLMAP input files
                 orientations = {}  # COLMAP name -> landscape/portrait/square
+                photo_locations = {}
                 taken, renamed = set(), []
                 unreadable = 0
                 exif_rotated = 0
@@ -578,7 +598,21 @@ async def sfm(
                     base = sfm_mod.unique_image_name(orig_base, taken)
                     if base != orig_base:
                         renamed.append(f"{info.filename} -> {base}")
-                    pil.save(os.path.join(img_dir, base))
+                    location = geo.extract_exif_gps(pil)
+                    if location:
+                        photo_locations[base] = location
+                    # Keep lens/focal/GPS metadata after transposing pixels.
+                    # Saving without EXIF loses COLMAP's focal-length prior.
+                    exif = pil.getexif()
+                    exif.pop(274, None)
+                    exif[256], exif[257] = pil.size
+                    if 34665 in exif:
+                        sub = exif.get_ifd(34665)
+                        sub[40962], sub[40963] = pil.size
+                    pil.save(os.path.join(img_dir, base), exif=exif.tobytes(),
+                             quality=95)
+                    with Image.open(os.path.join(img_dir, base)) as clean_input:
+                        clean_thumbnails[base] = thumbnail_data_url(clean_input)
                     kept[base] = pil
                     orientations[base] = sfm_mod.image_orientation(
                         pil.width, pil.height)
@@ -607,27 +641,9 @@ async def sfm(
                     warnings.append(
                         f"mixed orientations: {_ori_counts['landscape']} "
                         f"landscape and {_ori_counts['portrait']} "
-                        "portrait photo(s) — each photo gets its own "
-                        "COLMAP camera, so both reconstruct together "
-                        "in their upright frames")
-                # Server-side labels without any depth pass: explicit
-                # detections win per image, concepts fill the rest.
-                if names_in:
-                    auto, auto_errors = detect_concepts_no_depth(
-                        {k: v for k, v in kept.items() if k not in dets},
-                        names_in, detector=detector or "sam")
-                    if auto:
-                        dets = {**auto, **dets}
-                        warnings.append(
-                            f"detected {len(auto)} image(s) for "
-                            f"{', '.join(names_in)} with {detector or 'sam'} "
-                            "(boxes only, no depth pass)")
-                    else:
-                        why = ("; ".join(auto_errors[:3]) if auto_errors
-                               else "no boxes matched the concepts")
-                        warnings.append(
-                            f"concepts detection returned no boxes ({why}): "
-                            "cloud is unlabeled")
+                        "portrait photo(s) — COLMAP groups matching "
+                        "EXIF camera/focal metadata and dimensions; "
+                        "different portrait/landscape dimensions stay separate")
                 names = sorted(os.listdir(img_dir))
                 if len(names) < 2:
                     return {"error": "need at least 2 readable images "
@@ -640,6 +656,16 @@ async def sfm(
                 cameras, points, colors, parse_warnings = sfm_mod.parse_model(
                     model_dir)
                 warnings.extend(parse_warnings)
+                diagnostics = sfm_mod.reconstruction_diagnostics(
+                    model_dir, os.path.join(workspace, "sfm.db"), cameras)
+                diagnostics["input_images"] = len(names)
+                error_px = diagnostics["mean_reprojection_error_px"]
+                if error_px is not None and error_px > 2:
+                    warnings.append(f"Mean sparse reprojection error is {error_px:.2f} px: inspect calibration and matches in the diagnostics report.")
+                if len(cameras) < len(names):
+                    warnings.append(f"Only {len(cameras)} of {len(names)} photos registered in the selected model; the cloud does not combine the complete set.")
+                if len(names) <= 4 and diagnostics["camera_count"] > 1:
+                    warnings.append("This small set has multiple camera calibrations. Missing/different focal metadata or dimensions may leave calibration weakly constrained; inspect the diagnostics report.")
                 warnings.extend(sfm_mod.camera_dimension_warnings(
                     cameras,
                     {base: (pil.width, pil.height)
@@ -655,14 +681,15 @@ async def sfm(
                     warnings.append(f"downsampled {total} points "
                                     f"to {len(points)} for the PLY export")
                 ply_text = sfm_mod.write_ply_ascii(points, colors)
-                point_labels = {str(k): v for k, v in
-                                sfm_mod.vote_point_labels(
-                                    points, cameras, dets).items()}
+                point_labels = {}
                 registered = {c["image"] for c in cameras}
                 dense_ply, dense_count, dense_total = None, 0, 0
                 dense_labels = {}
+                d_pts = []
                 if want_dense:
-                    if sfm_mod.colmap_binary() is None:
+                    if not gpu_used:
+                        warnings.append("Dense stereo requires CUDA: returning sparse reconstruction because GPU processing is disabled or unavailable.")
+                    elif sfm_mod.colmap_binary() is None:
                         warnings.append("dense needs the COLMAP CLI: "
                                         "pycolmap fallback gives sparse only")
                     else:
@@ -683,13 +710,30 @@ async def sfm(
                                     f"to {len(d_pts)} for the reply")
                             dense_count = len(d_pts)
                             dense_ply = sfm_mod.write_ply_ascii(d_pts, d_cols)
-                            dense_labels = {
-                                str(k): v for k, v in
-                                sfm_mod.vote_point_labels_numpy(
-                                    d_pts, cameras, dets).items()}
                         except Exception as e:
                             warnings.append(f"dense stereo failed ({e}): "
                                             "sparse cloud still returned")
+                # Geometry finishes before any detector runs. Detectors
+                # receive disposable pixel copies, never COLMAP input files
+                # or the pristine images used for previews and diagnostics.
+                if names_in:
+                    emit("Labelling copies of source photos after reconstruction (no depth pass)")
+                    if detector == "sam" and os.getenv("MOCK_SAM") == "1":
+                        warnings.append("MOCK_SAM is enabled: labels are demo boxes, not model detections. Choose Meta API for real labels.")
+                    auto, auto_errors = detect_concepts_no_depth(
+                        {k: v.copy() for k, v in kept.items() if k not in dets},
+                        names_in, detector=detector or "sam",
+                        **({"api_token": sam_token} if detector == "api" else {}))
+                    if auto:
+                        dets = {**auto, **dets}
+                        warnings.append(f"detected {len(auto)} image(s) for {', '.join(names_in)} with {detector or 'sam'} (boxes only, no depth pass)")
+                    else:
+                        why = "; ".join(auto_errors[:3]) if auto_errors else "no boxes matched the concepts"
+                        warnings.append(f"concepts detection returned no boxes ({why}): cloud is unlabeled")
+                if want_labels and dets:
+                    point_labels = {str(k): v for k, v in sfm_mod.vote_point_labels(points, cameras, dets).items()}
+                    if dense_ply and d_pts:
+                        dense_labels = {str(k): v for k, v in sfm_mod.vote_point_labels_numpy(d_pts, cameras, dets).items()}
                 return {
                     "ply": ply_text,
                     "point_count": len(points),
@@ -698,15 +742,19 @@ async def sfm(
                     # ({image: [{label, box, score}]}), shown in the page's
                     # SAM stage box before the 3D view.
                     "detections": dets,
+                    "label_objects": want_labels,
+                    "colmap_inputs_annotated": False,
                     # Downscaled per-photo JPEGs + original sizes so the page
                     # can draw the boxes over the photos (SAM image viewer).
-                    "thumbnails": {base: thumbnail_data_url(pil)
-                                   for base, pil in kept.items()},
+                    "thumbnails": clean_thumbnails,
                     "image_sizes": {base: [pil.width, pil.height]
                                     for base, pil in kept.items()},
                     # Upright orientation per photo (landscape/portrait/
                     # square), so the page can badge mixed sets.
                     "orientations": orientations,
+                    "photo_locations": photo_locations,
+                    "coordinate_frame": "local-sfm",
+                    "diagnostics": diagnostics,
                     "cameras": cameras,
                     "point_labels": point_labels,
                     "registered": sorted(registered),

@@ -1,0 +1,67 @@
+{
+  "source_job": "f60da2fbe06e481fbf3bfb60c80fa5b8",
+  "engine": "4.2.1",
+  "device": "CPU",
+  "feature_max_size": 2400,
+  "feature_cap": 8192,
+  "results": [
+    {
+      "mode": "independent",
+      "components": 1,
+      "registered": 3,
+      "points": 1198,
+      "cameras": 3,
+      "mean_error_px": 0.5456397226565486,
+      "mean_track": 3.0,
+      "intrinsics": [
+        {
+          "id": 1,
+          "params": [
+            8722.910286439845,
+            2142.0,
+            2856.0,
+            0.05357798839178606
+          ]
+        },
+        {
+          "id": 2,
+          "params": [
+            6976.017778535464,
+            2142.0,
+            2856.0,
+            0.04867477343496568
+          ]
+        },
+        {
+          "id": 3,
+          "params": [
+            6976.027447229823,
+            2142.0,
+            2856.0,
+            0.04867768791232042
+          ]
+        }
+      ]
+    },
+    {
+      "mode": "auto",
+      "components": 1,
+      "registered": 3,
+      "points": 1188,
+      "cameras": 1,
+      "mean_error_px": 0.709432537108469,
+      "mean_track": 3.0,
+      "intrinsics": [
+        {
+          "id": 1,
+          "params": [
+            4576.294838810069,
+            2142.0,
+            2856.0,
+            0.020205160424914215
+          ]
+        }
+      ]
+    }
+  ]
+}

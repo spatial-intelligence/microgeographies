@@ -371,10 +371,13 @@ def test_sfm_concepts_label_without_depth():
                    files={"zipfile": ("s.zip", zb.getvalue(),
                                        "application/zip")},
                    data={"concepts": json.dumps(["door"]),
+                         "label_objects": "1",
                          "detector": "sam", "use_gpu": "0"})
         body = _sfm_final_data(r)
         assert "error" not in body, body
         assert body["point_labels"]["0"]["label"] == "door", body
+        assert body["diagnostics"]["camera_count"] == 1
+        assert body["diagnostics"]["input_images"] == 2
         assert any("no depth pass" in w for w in body["warnings"]), body
     finally:
         sfm.colmap_binary, sfm.reconstruct = old_bin, old_recon
@@ -439,6 +442,7 @@ def test_sfm_concepts_failure_warns_unlabeled():
                    files={"zipfile": ("s.zip", zb.getvalue(),
                                        "application/zip")},
                    data={"concepts": json.dumps(["door"]),
+                         "label_objects": "1",
                          "use_gpu": "0"})
         body = _sfm_final_data(r)
         assert "error" not in body, body
@@ -638,7 +642,10 @@ def test_run_dense_cli_undistorts_first():
             assert cmd[cmd.index("--output_path") + 1].endswith("dense"), cmd
         if cmd[1] == "patch_match_stereo":
             assert cmd[cmd.index("--workspace_path") + 1].endswith("dense"), cmd
+            assert cmd[cmd.index("--PatchMatchStereo.geom_consistency") + 1] == "1"
         if cmd[1] == "stereo_fusion":
+            assert cmd[cmd.index("--input_type") + 1] == "geometric"
+            assert cmd[cmd.index("--StereoFusion.min_num_pixels") + 1] == "3"
             out = cmd[cmd.index("--output_path") + 1]
             _write(out, "fake-ply")
     sfm._run = _fake
@@ -838,7 +845,7 @@ def test_sfm_response_includes_detections():
         r = c.post("/api/sfm",
                    files={"zipfile": ("s.zip", zb.getvalue(),
                                        "application/zip")},
-                   data={"detections": json.dumps(given)})
+                   data={"detections": json.dumps(given), "label_objects": "1"})
         body = _sfm_final_data(r)
         assert "error" not in body, body
         assert body["detections"]["a.jpg"][0]["label"] == "door", body
@@ -1013,28 +1020,13 @@ def test_camera_dimension_warnings():
     assert len(sfm.camera_dimension_warnings(wrong, sizes)) == 1
 
 
-def test_camera_per_image_args_both_spellings():
-    tmp = tempfile.mkdtemp(prefix="sfm-camargs-")
-    new = os.path.join(tmp, "colmap-new")
-    with open(new, "w") as fh:
-        fh.write("#!/bin/sh\necho '--ImageReader.single_camera arg (=0)'\n"
-                 "echo '--ImageReader.single_camera_per_image arg (=0)'\n")
-    old = os.path.join(tmp, "colmap-old")
-    with open(old, "w") as fh:
-        fh.write("#!/bin/sh\necho '--ImageReader.single_camera arg (=0)'\n")
-    os.chmod(new, 0o755)
-    os.chmod(old, 0o755)
-    assert sfm._camera_per_image_args(new) == [
-        "--ImageReader.single_camera_per_image", "1"]
-    assert sfm._camera_per_image_args(old) == [
-        "--ImageReader.single_camera", "0"]
-    # Missing binary must not raise: safe per-image spelling.
-    assert sfm._camera_per_image_args(
-        os.path.join(tmp, "missing")) == [
-        "--ImageReader.single_camera", "0"]
+def test_camera_reader_does_not_force_independent_or_single_camera():
+    args = sfm._camera_reader_args()
+    assert args[args.index("--ImageReader.single_camera") + 1] == "0"
+    assert args[args.index("--ImageReader.single_camera_per_image") + 1] == "0"
 
 
-def test_pycolmap_forces_per_image_camera_mode():
+def test_pycolmap_uses_automatic_camera_sharing():
     import sys
     import types
     calls = {}
@@ -1054,7 +1046,7 @@ def test_pycolmap_forces_per_image_camera_mode():
             del sys.modules["pycolmap"]
         else:
             sys.modules["pycolmap"] = old
-    assert calls["extract"].get("camera_mode") == "per_image", calls
+    assert calls["extract"].get("camera_mode") == "auto", calls
 
 
 def test_sfm_zip_duplicate_basenames_and_portrait_upright():
@@ -1075,6 +1067,12 @@ def test_sfm_zip_duplicate_basenames_and_portrait_upright():
         captured["sizes"] = {
             fn: Image.open(os.path.join(img_dir, fn)).size
             for fn in sorted(os.listdir(img_dir))}
+        for fn in os.listdir(img_dir):
+            saved = Image.open(os.path.join(img_dir, fn))
+            assert saved.getexif().get(274, 1) == 1
+            assert saved.getexif().get_ifd(34665)[41989] == 26
+            assert saved.getexif().get_ifd(34665)[40962] == saved.width
+            assert server.geo.extract_exif_gps(saved) == {"lat": 51.5, "lon": -0.1}
         model = os.path.join(workspace_dir, "sparse", "0")
         os.makedirs(model, exist_ok=True)
         _write(os.path.join(model, "cameras.txt"),
@@ -1090,6 +1088,8 @@ def test_sfm_zip_duplicate_basenames_and_portrait_upright():
         im = Image.new("RGB", (w, h), (10, 100, 200))
         ex = Image.Exif()
         ex[274] = orient
+        ex[34665] = {41989: 26, 40962: w, 40963: h}
+        ex[34853] = {1: "N", 2: (51, 30, 0), 3: "W", 4: (0, 6, 0)}
         buf = io.BytesIO()
         im.save(buf, "JPEG", exif=ex)
         return buf.getvalue()
@@ -1113,6 +1113,7 @@ def test_sfm_zip_duplicate_basenames_and_portrait_upright():
         # Members sort by zip path, so tall/dup.jpg keeps the plain name.
         assert body["orientations"]["dup.jpg"] == "portrait", body
         assert body["orientations"]["dup__2.jpg"] == "landscape", body
+        assert body["photo_locations"]["dup.jpg"] == {"lat": 51.5, "lon": -0.1}
         assert any("rotated upright" in w for w in body["warnings"]), body
         assert any("shared the filename" in w for w in body["warnings"]), body
         assert any("mixed" in w for w in body["warnings"]), body

@@ -277,7 +277,8 @@ def parse_model(sparse_dir):
                             f"{cam['model']}, skipped")
             continue
         cameras.append({"image": v["image"], "qvec": v["qvec"],
-                        "tvec": v["tvec"], "width": cam["width"],
+                        "tvec": v["tvec"], "camera_id": v["camera_id"],
+                        "width": cam["width"],
                         "height": cam["height"], "model": cam["model"],
                         "params": cam["params"]})
     return cameras, points, colors, warnings
@@ -450,14 +451,15 @@ def _sparse_listing(path):
 
 
 def _pick_model_dir(sparse_dir):
-    """Best numeric model dir (largest points file, .txt or .bin).
+    """Best numeric model dir: most registered photos, then points size.
 
     The mapper numbers models 0, 1, ... with 0 usually the largest,
-    but size order is not guaranteed — pick by points-file size so a
-    stray empty 0/ never shadows a real reconstruction. None when
-    there is nothing to pick.
+    Match the connected model selection used by the comparison app.
+    A detailed two-photo fragment should not displace a model joining
+    more of the uploaded set. Points-file size breaks ties.
     """
-    best, best_size = None, -1
+    import struct
+    best, best_rank = None, (-1, -1)
     for name in _sparse_listing(sparse_dir):
         if not name.isdigit():
             continue
@@ -471,8 +473,21 @@ def _pick_model_dir(sparse_dir):
                     os.path.join(model_dir, fn)))
             except OSError:
                 continue
-        if size > best_size:
-            best, best_size = model_dir, size
+        if size < 0:
+            continue
+        registered = 0
+        try:
+            image_text = os.path.join(model_dir, "images.txt")
+            if os.path.isfile(image_text):
+                registered = len(parse_images_text(image_text))
+            else:
+                with open(os.path.join(model_dir, "images.bin"), "rb") as fh:
+                    registered = struct.unpack("<Q", fh.read(8))[0]
+        except (OSError, ValueError, struct.error):
+            pass
+        rank = (registered, size)
+        if rank > best_rank:
+            best, best_rank = model_dir, rank
     return best
 
 
@@ -575,6 +590,54 @@ def camera_dimension_warnings(cameras, image_sizes):
     return warnings
 
 
+def reconstruction_diagnostics(model_dir, database_path, cameras):
+    """Small, image-free report for inspecting a bad reconstruction."""
+    import statistics
+    errors, tracks = [], []
+    for line in _data_lines(os.path.join(model_dir, "points3D.txt")):
+        parts = line.split()
+        error = float(parts[7])
+        if math.isfinite(error):
+            errors.append(error)
+        tracks.append(max(0, (len(parts) - 8) // 2))
+    intrinsics = []
+    for cam in cameras:
+        fx, fy, cx, cy, *_ = _distortion(cam["model"], cam["params"])
+        intrinsics.append({"image": cam["image"], "camera_id": cam["camera_id"],
+                           "model": cam["model"], "width": cam["width"],
+                           "height": cam["height"], "params": cam["params"],
+                           "hfov_deg": math.degrees(2 * math.atan(cam["width"] / (2 * fx)))
+                           if fx > 0 else None})
+    report = {
+        "camera_sharing": "auto-exif", "camera_count": len({c["camera_id"] for c in cameras}),
+        "registered_images": len(cameras), "sparse_points": len(tracks),
+        "mean_reprojection_error_px": statistics.mean(errors) if errors else None,
+        "median_reprojection_error_px": statistics.median(errors) if errors else None,
+        "mean_track_length": statistics.mean(tracks) if tracks else None,
+        "points_seen_in_3plus_images": sum(n >= 3 for n in tracks),
+        "intrinsics": intrinsics, "pairs": [],
+    }
+    if not os.path.isfile(database_path):
+        return report
+    import sqlite3
+    from pathlib import Path
+    try:
+        # Read-only: do not create an empty DB when a backend supplied none.
+        with sqlite3.connect(Path(database_path).resolve().as_uri() + "?mode=ro", uri=True) as db:
+            images = dict(db.execute("SELECT image_id, name FROM images"))
+            pairs = {int(pair): (int(n), int(config)) for pair, n, config in db.execute(
+                "SELECT pair_id, rows, config FROM two_view_geometries")}
+            ids = sorted(images)
+            for i, first in enumerate(ids):
+                for second in ids[i + 1:]:
+                    n, config = pairs.get(first * 2147483647 + second, (0, 0))
+                    report["pairs"].append({"image1": images[first], "image2": images[second],
+                                            "verified_matches": n, "configuration": config})
+    except sqlite3.Error as exc:
+        report["database_note"] = f"Match diagnostics unavailable: {exc}"
+    return report
+
+
 def _feature_extractor_help(binary):
     """feature_extractor --help text (stdout+stderr), "" when unprobeable."""
     try:
@@ -586,22 +649,38 @@ def _feature_extractor_help(binary):
         return ""
 
 
-def _camera_per_image_args(binary):
-    """Extractor args forcing one camera per image.
+def _camera_reader_args():
+    """Use COLMAP's metadata-based calibration sharing.
 
-    A shared camera carries one width/height and principal point for
-    every photo. In a mixed landscape/portrait set that applies one
-    orientation's frame to the other and warps the cloud, so each photo
-    must get its own camera. COLMAP 4.x spells this
-    --ImageReader.single_camera_per_image; 3.x only has
-    --ImageReader.single_camera (0 = per image). Probed from --help like
-    the GPU flags; the 3.x spelling is the safe fallback because it
-    exists in both generations.
+    AUTO groups matching EXIF make/model/focal length AND dimensions.
+    It keeps portrait and landscape frames separate without forcing
+    unrelated focal/distortion estimates for every image. Without
+    identifying EXIF, COLMAP creates separate cameras. Both flags exist
+    in the Docker-pinned 3.9.1 and in current COLMAP.
     """
-    out = _feature_extractor_help(binary)
-    if "ImageReader.single_camera_per_image" in out:
-        return ["--ImageReader.single_camera_per_image", "1"]
-    return ["--ImageReader.single_camera", "0"]
+    return ["--ImageReader.single_camera", "0",
+            "--ImageReader.single_camera_per_image", "0",
+            "--ImageReader.camera_model", "SIMPLE_RADIAL"]
+
+
+def _quality_args(binary):
+    """More SIFT features and guided matching, when advertised by this CLI."""
+    extract = []
+    help_text = _feature_extractor_help(binary)
+    if "SiftExtraction.max_num_features" in help_text:
+        extract = ["--SiftExtraction.max_num_features", str(SPARSE_SIFT_MAX_FEATURES)]
+    try:
+        proc = subprocess.run([binary, "exhaustive_matcher", "--help"],
+                              capture_output=True, text=True, timeout=60)
+        help_text = (proc.stdout or "") + (proc.stderr or "")
+    except Exception:
+        help_text = ""
+    match = []
+    for name in ("FeatureMatching.guided_matching", "SiftMatching.guided_matching"):
+        if name in help_text:
+            match = ["--" + name, "1"]
+            break
+    return extract, match
 
 
 def _sift_gpu_flags(binary, gpu_used):
@@ -641,14 +720,16 @@ def run_colmap_cli(images_dir, workspace_dir, gpu_used, emit=None):
         warnings.append("no GPU detected: COLMAP runs on CPU "
                         "(SIFT extraction/matching without CUDA)")
     extract_gpu, match_gpu = _sift_gpu_flags(binary, gpu_used)
+    extract_quality, match_quality = _quality_args(binary)
+    _note(emit, "Camera calibration: AUTO sharing by EXIF camera/focal length and image dimensions")
     try:
         _run([binary, "feature_extractor",
               "--database_path", db_path, "--image_path", images_dir,
-              *_camera_per_image_args(binary),
-              *extract_gpu], warnings, emit)
+              *_camera_reader_args(),
+              *extract_gpu, *extract_quality], warnings, emit)
         _run([binary, "exhaustive_matcher",
               "--database_path", db_path,
-              *match_gpu], warnings, emit)
+              *match_gpu, *match_quality], warnings, emit)
         _run([binary, "mapper",
               "--database_path", db_path, "--image_path", images_dir,
               "--output_path", sparse_dir], warnings, emit)
@@ -744,14 +825,12 @@ def run_colmap_pycolmap(images_dir, workspace_dir, gpu_used, emit=None):
         raise RuntimeError("installed pycolmap lacks extract_features / "
                            "match_exhaustive / incremental_mapping")
     # Newer pycolmap speaks extraction_options + device; older ones
-    # take sift_options. Prefer the new spelling when present. Either
-    # way every photo gets its own camera (PER_IMAGE): a camera shared
-    # across a mixed landscape/portrait set would impose one
-    # orientation's width/height and principal point on the other.
+    # take sift_options. AUTO shares compatible camera metadata and
+    # dimensions, while retaining separate calibration for mixed sizes.
     cam_mode = {}
     modes = getattr(pycolmap, "CameraMode", None)
-    if modes is not None and hasattr(modes, "PER_IMAGE"):
-        cam_mode = {"camera_mode": modes.PER_IMAGE}
+    if modes is not None and hasattr(modes, "AUTO"):
+        cam_mode = {"camera_mode": modes.AUTO}
     try:
         _note(emit, "extracting SIFT features "
                     f"({'GPU' if gpu_used else 'CPU'})…")
@@ -784,8 +863,9 @@ def run_colmap_pycolmap(images_dir, workspace_dir, gpu_used, emit=None):
         if not maps:
             raise RuntimeError("pycolmap produced no model "
                                "(too few matches? try more overlap)")
-        best = max(maps.values(),
-                   key=lambda r: len(getattr(r, "points3D", [])))
+        best = max(maps.values(), key=lambda r: (
+            r.num_reg_images() if callable(getattr(r, "num_reg_images", None)) else 0,
+            len(getattr(r, "points3D", []))))
         model_dir = os.path.join(sparse_dir, "0")
         best.write_text(model_dir)
     except SfmError:
@@ -840,7 +920,7 @@ def run_dense_cli(binary, workspace_dir, gpu_used, emit=None):
     """
     warnings = []
     if not gpu_used:
-        warnings.append("dense stereo runs on CPU (slow on large photos)")
+        warnings.append("COLMAP dense stereo requires CUDA; CPU-only builds cannot run PatchMatch")
     sparse_dir = os.path.join(workspace_dir, "sparse")
     model_dir = _pick_model_dir(sparse_dir)
     if model_dir is None:
@@ -853,18 +933,22 @@ def run_dense_cli(binary, workspace_dir, gpu_used, emit=None):
           "--image_path", os.path.join(workspace_dir, "images"),
           "--input_path", model_dir,
           "--output_path", dense_dir,
-          "--output_type", "COLMAP"], warnings, emit)
+          "--output_type", "COLMAP",
+          "--max_image_size", "1600"], warnings, emit)
     _note(emit, "dense stereo matching (slow)…")
     _run([binary, "patch_match_stereo",
           "--workspace_path", dense_dir,
           "--workspace_format", "COLMAP",
+          "--PatchMatchStereo.geom_consistency", "1",
+          "--PatchMatchStereo.max_image_size", "1600",
           *_dense_gpu_flags(binary, gpu_used)], warnings, emit)
     fused = os.path.join(workspace_dir, "fused.ply")
     _note(emit, "fusing dense depth maps…")
     _run([binary, "stereo_fusion",
           "--workspace_path", dense_dir,
           "--workspace_format", "COLMAP",
-          "--input_type", "photometric",
+          "--input_type", "geometric",
+          "--StereoFusion.min_num_pixels", "3",
           "--output_path", fused], warnings, emit)
     if not os.path.isfile(fused):
         raise RuntimeError("stereo_fusion left no fused.ply "

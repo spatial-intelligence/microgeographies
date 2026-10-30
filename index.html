@@ -3,26 +3,26 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>MicroGeo Capture Tool v0.11</title>
+  <title>MicroGeo Capture Tool v0.15</title>
   <meta name="description" content="Test page: upload a photo, send it to SAM 3.1 with object prompts, get bounding boxes back with GPS.">
-  <meta name="theme-color" content="#1a2b1f">
+  <meta name="theme-color" content="#142b4a">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon.svg">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="viewer-navigation.css">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <script type="importmap">
   {
     "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
-      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+      "three": "./vendor/three.module.js"
     }
   }
   </script>
 </head>
 <body>
   <header>
-    <h1>MicroGeo Capture Tool <span class="ver">v0.11</span></h1>
+    <h1>MicroGeo Capture Tool <span class="ver">v0.15</span></h1>
     <p class="tagline">Collect delivery-point microgeography: photo → depth → map pin.</p>
     <p id="secureNote"></p>
   </header>
@@ -122,16 +122,22 @@
         Drop a <b>.zip</b> of photos here, or click to pick one.
       </div>
       <input type="file" id="zipInput" accept=".zip,application/zip">
-      <p class="hint">Up to 20 photos. Upload once — both set routes below share this zip. Each photo needs EXIF GPS (or press Get GPS location in single-photo mode as fallback); EXIF direction is used per photo unless a heading is set there.</p>
+      <p class="hint">Up to 20 photos. For 3D, use overlapping views taken from different positions; GPS is optional. For map pins, photos need GPS and a heading (EXIF or a fallback set in single-photo mode).</p>
       <label>Concepts to find (comma separated)
         <input type="text" id="setConcepts" value="door, steps" autocomplete="off">
       </label>
       <label>Server detector (labels only — browser detectors are single-photo)
         <select id="setDetector">
-          <option value="sam" selected>Server SAM 3 (precise boxes; needs weights/GPU first time)</option>
+          <option value="api" selected>Meta API · SAM 3.1</option>
+          <option value="sam">Server SAM 3 (uses demo boxes when MOCK_SAM=1)</option>
           <option value="clip">Local CLIP windows (coarse boxes, offline after download)</option>
         </select>
       </label>
+      <label id="setTokenLabel">Meta API token
+        <input type="password" id="setApiToken" autocomplete="off" placeholder="Your Meta API key">
+        <span class="hint">Used for this ZIP request via your backend. Also shared with the single-photo token setting.</span>
+      </label>
+      <p id="setLabellingNote" class="hint" hidden>SAM is off for this 3D run. Concepts, detector and API token are not used.</p>
     </section>
 
     <section class="card" id="secBatch" data-title="Batch → pins">
@@ -153,31 +159,43 @@
 
     <section class="card" id="secSfm" data-title="Photo set → 3D">
       <h2>8. Photo set → 3D</h2>
-      <p class="hint">Uses the zip picked above. COLMAP geometry only — no depth pass runs. Labels come from the concepts above (leave empty for a fast unlabeled cloud). Needs the COLMAP backend on the server.</p>
+      <p class="hint">COLMAP always reconstructs from clean, unlabelled photos. Optional SAM labelling runs afterwards on separate copies. No monocular-depth pass runs.</p>
       <p class="hint" id="sfmBackend">Checking whether this server can run COLMAP…</p>
       <p class="hint">Mixed landscape and portrait photos are fine: portrait phone photos are rotated upright automatically before COLMAP sees them. For a good cloud use 8+ photos of the same subject with 60–80% overlap as you move; blank walls, glass and sky match poorly.</p>
       <label class="row"><input type="checkbox" id="sfmDense" checked> Dense cloud (stereo matching — slower, far denser)</label>
       <label class="row"><input type="checkbox" id="sfmCpu"> Force CPU (skip GPU even when one is visible)</label>
+      <label class="row"><input type="checkbox" id="sfmUseSam"> Use SAM / object labelling after reconstruction (optional)</label>
       <button type="button" id="sfmBtn" class="primary">Reconstruct 3D</button>
+      <button type="button" id="sfmDiagnostics" disabled>Download diagnostics</button>
       <p id="sfmOut" role="status"></p>
       <progress id="sfmProg" max="100" value="0" hidden></progress>
       <pre id="sfmLog" class="sfm-log" hidden></pre>
       <div id="sfmStats" class="sfm-stats" hidden></div>
       <ul id="sfmWarn" class="warn-list" hidden></ul>
+      <div id="sfmCleanWrap" hidden>
+        <h3>COLMAP input photos — unlabelled</h3>
+        <p class="hint">Previews read from the actual files passed to COLMAP. Any SAM annotations appear only on separate copies below.</p>
+        <div id="sfmCleanGrid" class="sam-grid"></div>
+      </div>
       <div id="sfmSamBox" class="sam-box" hidden>
         <h3>SAM labels (per photo — feeds the 3D point labels)</h3>
         <p class="hint" id="sfmSamNote"></p>
         <ul id="sfmSamList"></ul>
       </div>
       <div id="sfmImgWrap" hidden>
-        <h3>SAM boxes on photos</h3>
+        <h3>SAM boxes — separate annotated copies</h3>
         <div id="sfmImgGrid" class="sam-grid"></div>
       </div>
       <div id="sfmWrap" class="sfm-wrap">
         <div id="sfmToolbar" class="sfm-toolbar" role="toolbar" aria-label="3D tools">
-          <button type="button" id="toolOrbit" class="tool" aria-pressed="false">Orbit</button>
-          <button type="button" id="toolIdentify" class="tool active" aria-pressed="true">Identify</button>
-          <button type="button" id="toolReset" class="tool">Reset view</button>
+          <button type="button" id="toolReset" class="tool primary" title="Fit the whole cloud using the SLAM-image-1 viewer (F)">Fit view</button>
+          <button type="button" id="toolTop" class="tool">Top</button>
+          <button type="button" id="toolResetRoll" class="tool">Reset roll</button>
+          <button type="button" id="toolExpand" class="tool" aria-pressed="false">Expand viewer</button>
+          <button type="button" id="toolZoomIn" class="tool" aria-label="Zoom in">Zoom +</button>
+          <button type="button" id="toolZoomOut" class="tool" aria-label="Zoom out">Zoom −</button>
+          <button type="button" id="toolOrbit" class="tool active" aria-pressed="true">Orbit</button>
+          <button type="button" id="toolIdentify" class="tool" aria-pressed="false">Identify</button>
           <button type="button" id="toolExport" class="tool">Export</button>
           <label class="tool-slider">Colours
             <select id="toolColorMode">
@@ -190,12 +208,16 @@
             <input type="range" id="sfmPointSize" min="0.25" max="4" step="0.25" value="1" aria-label="Point size">
           </label>
         </div>
+        <div class="reconstruction-layout">
         <div id="sfmViewWrap" class="sfm-view-wrap">
           <div id="sfmView" class="sfm-view sfm-single"></div>
-          <div class="sfm-zone sfm-zone-top" data-move="zoom" title="Zoom: press and slide right to move in, left to move out"><span>zoom</span></div>
-          <div class="sfm-zone sfm-zone-bottom" data-move="pan" title="Pan: press and slide left or right to move across the cloud"><span>pan</span></div>
-          <div class="sfm-zone sfm-zone-left" data-move="roll" title="Roll: press and slide up or down to roll the view"><span>roll</span></div>
-          <div class="sfm-zone sfm-zone-right" data-move="roll" title="Roll: press and slide up or down to roll the view"><span>roll</span></div>
+        </div>
+        <aside class="survey-map">
+          <h3>Photo locations</h3>
+          <p class="hint" id="sfmMapNote">Photo GPS will appear here after reconstruction.</p>
+          <div id="sfmMap" aria-label="Map of photo EXIF GPS locations"></div>
+          <p class="hint">Markers show the original photo GPS. The cloud uses a local coordinate frame; its scale and north alignment are not calibrated to this map.</p>
+        </aside>
         </div>
         <p class="hint sfm-empty" id="sfmEmpty">No 3D data yet — reconstruct a zip first.</p>
         <div class="sfm-popup" id="sfmPopup" hidden></div>
@@ -222,7 +244,7 @@
           </div>
         </div>
       </div>
-      <p class="hint">Left-drag the picture to orbit, right-drag to pan, scroll to zoom. The zoom (top), pan (bottom) and roll (sides) strips do nothing until you press and slide along one — slide up or down on a side strip to roll. Click a point in Identify mode for its label. Dense cloud needs the COLMAP CLI on the server (<code>sudo apt-get install -y colmap</code>); without it you get a sparser pycolmap cloud.</p>
+      <p class="hint">SLAM-image-1 viewer: drag to orbit, right-drag to pan, wheel to zoom. Fit view (F) restores the whole scene; Top and Reset roll use the other app's controls. Drag the edges for zoom, pan or roll; hold Shift for fine adjustment. Expand viewer gives more space (Escape restores it).</p>
     </section>
   </main>
 

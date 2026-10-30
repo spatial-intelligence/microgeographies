@@ -735,6 +735,12 @@
               note: "Set route: the shared zip + concepts above; COLMAP only — no depth pass." },
   };
   const modeOut = $("modeOut");
+  function syncSetLabellingControls() {
+    const disabled = currentMode() === "set-3d" && !$("sfmUseSam").checked;
+    ["setConcepts", "setDetector", "setApiToken"].forEach((id) => { $(id).disabled = disabled; });
+    $("setLabellingNote").hidden = !disabled;
+  }
+  $("sfmUseSam").addEventListener("change", syncSetLabellingControls);
   function currentMode() {
     const el = document.querySelector('input[name="mode"]:checked');
     return (el && MODES[el.value]) ? el.value : "single";
@@ -760,6 +766,7 @@
     });
     if (modeOut) modeOut.textContent = MODES[mode].note;
     document.body.classList.toggle("wide", mode === "set-3d");
+    syncSetLabellingControls();
     try { localStorage.setItem("mg.mode", mode); } catch (e) { /* private mode */ }
   }
   document.querySelectorAll('input[name="mode"]').forEach((el) => {
@@ -775,6 +782,19 @@
     radiusInput = $("radiusInput"), simInput = $("simInput"),
     setConcepts = $("setConcepts"), setDetector = $("setDetector");
   let lastBatch = null, batchLayers = null;
+  const setApiToken = $("setApiToken");
+  setApiToken.value = tokenInput.value;
+  setApiToken.addEventListener("input", () => {
+    tokenInput.value = setApiToken.value;
+  });
+  setApiToken.addEventListener("change", () => tokenInput.dispatchEvent(new Event("change")));
+  tokenInput.addEventListener("input", () => { setApiToken.value = tokenInput.value; });
+  function zipDetectorFields(fd) {
+    if (setDetector.value === "api") {
+      if (!setApiToken.value.trim()) throw new Error("Enter your Meta API token above.");
+      fd.append("sam_token", setApiToken.value.trim());
+    }
+  }
 
   // Shared zip drop zone: drag-and-drop plus click-to-browse, sharing
   // zipInput as the fallback picker. One upload feeds both set routes.
@@ -820,6 +840,7 @@
       fd.append("zipfile", zf);
       fd.append("concepts", JSON.stringify(prompts));
       fd.append("detector", (setDetector && setDetector.value) || "sam");
+      zipDetectorFields(fd);
       locationFields(fd);
       const hdg = currentHeading();
       if (hdg != null) fd.append("heading", String(hdg));
@@ -932,6 +953,40 @@
   const sfmBtn = $("sfmBtn"), sfmOut = $("sfmOut");
   let sfmViewer = null;
   let sfmLib = null;
+  let sfmMap = null, sfmMapLayers = null;
+  let sfmReport = null;
+  $("sfmDiagnostics").addEventListener("click", () => {
+    if (sfmReport) saveJson(sfmReport, "microgeo-reconstruction-diagnostics.json");
+  });
+
+  function renderSfmMap(data) {
+    const note = $("sfmMapNote");
+    if (sfmMapLayers) { sfmMapLayers.remove(); sfmMapLayers = null; }
+    const locations = Object.entries(data.photo_locations || {}).filter(([, p]) =>
+      Number.isFinite(p.lat) && Number.isFinite(p.lon) &&
+      Math.abs(p.lat) <= 90 && Math.abs(p.lon) <= 180);
+    if (!window.L) { note.textContent = "Map library unavailable. Internet access is required to load the map."; return; }
+    if (!sfmMap) {
+      sfmMap = window.L.map("sfmMap").setView([20, 0], 2);
+      window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 20, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      }).addTo(sfmMap);
+      new ResizeObserver(() => sfmMap.invalidateSize()).observe($("sfmMap"));
+    }
+    sfmMapLayers = window.L.layerGroup().addTo(sfmMap);
+    const registered = new Set(data.registered || []);
+    locations.forEach(([name, p]) => {
+      const caption = document.createElement("span");
+      caption.textContent = `${name} · ${registered.has(name) ? "Registered" : "Not registered"}`;
+      window.L.circleMarker([p.lat, p.lon], {
+        radius: 7, color: registered.has(name) ? "#183b68" : "#b45309", fillOpacity: 0.8,
+      }).addTo(sfmMapLayers).bindPopup(caption);
+    });
+    if (locations.length) sfmMap.fitBounds(locations.map(([, p]) => [p.lat, p.lon]), { padding: [28, 28], maxZoom: 18 });
+    else sfmMap.setView([20, 0], 2);
+    note.textContent = locations.length ? `${locations.length} photo(s) with EXIF GPS. Blue: registered; amber: unregistered.` :
+      "These photos contain no usable EXIF GPS. The 3D reconstruction still works.";
+  }
   // Loaded cloud for viewing + export: Float32Arrays plus parallel
   // label/vote arrays (null label = unlabeled).
   let sfmData = null;
@@ -990,6 +1045,11 @@
         ["Orientations", oriText],
         ["GPU", data.gpu_used ? "Yes" : "No (CPU)"],
       ];
+      if (data.diagnostics) {
+        items.push(["Camera calibrations", String(data.diagnostics.camera_count)]);
+        const error = data.diagnostics.mean_reprojection_error_px;
+        items.push(["Mean reprojection", Number.isFinite(error) ? `${error.toFixed(2)} px` : "Unavailable"]);
+      }
       stats.innerHTML = "";
       items.forEach(([k, v]) => {
         const cell = document.createElement("div");
@@ -1044,8 +1104,20 @@
     });
     const reset = $("toolReset");
     if (reset) reset.addEventListener("click", () => {
-      if (sfmViewer) sfmViewer.resetView();
+      if (sfmViewer) sfmViewer.fitBounds();
     });
+    $("toolTop").addEventListener("click", () => sfmViewer?.topView());
+    $("toolResetRoll").addEventListener("click", () => sfmViewer?.resetRoll());
+    $("toolZoomIn").addEventListener("click", () => sfmViewer?.zoomBy(1.25));
+    $("toolZoomOut").addEventListener("click", () => sfmViewer?.zoomBy(.8));
+    function expand(value) {
+      $("sfmWrap").classList.toggle("expanded", value);
+      document.body.classList.toggle("viewer-expanded", value);
+      $("toolExpand").textContent = value ? "Restore viewer" : "Expand viewer";
+      $("toolExpand").setAttribute("aria-pressed", String(value));
+    }
+    $("toolExpand").addEventListener("click", () => expand(!$("sfmWrap").classList.contains("expanded")));
+    document.addEventListener("keydown", e => { if (e.key === "Escape") expand(false); });
     const exp = $("toolExport");
     if (exp) exp.addEventListener("click", () => {
       if (!sfmData) { sfmOut.textContent = "Reconstruct a cloud first, then export it."; return; }
@@ -1057,29 +1129,6 @@
     if (close) close.addEventListener("click", () => { $("sfmExportDlg").hidden = true; });
     const go = $("sfmExportGo");
     if (go) go.addEventListener("click", sfmExportDownload);
-    // Drag strips: nothing moves on hover — press and slide along a
-    // strip to drive it, release to stop. Pointer capture keeps the
-    // drag alive if the pointer slips off the thin strip.
-    document.querySelectorAll("#sfmWrap .sfm-zone").forEach((z) => {
-      const move = z.dataset.move;
-      let last = null;
-      z.addEventListener("pointerdown", (e) => {
-        if (!sfmViewer) return;
-        last = [e.clientX, e.clientY];
-        z.setPointerCapture(e.pointerId);
-        z.classList.add("active");
-        e.preventDefault();
-      });
-      z.addEventListener("pointermove", (e) => {
-        if (!sfmViewer || !last) return;
-        const dx = e.clientX - last[0], dy = e.clientY - last[1];
-        last = [e.clientX, e.clientY];
-        sfmViewer.dragZone(move, dx, dy);
-      });
-      const end = () => { last = null; z.classList.remove("active"); };
-      z.addEventListener("pointerup", end);
-      z.addEventListener("pointercancel", end);
-    });
   }
 
   // SAM stage box: the per-image boxes that fed 3D label voting,
@@ -1089,14 +1138,14 @@
   function renderSfmSam(data, detector) {
     const boxEl = $("sfmSamBox"), note = $("sfmSamNote"), list = $("sfmSamList");
     if (!boxEl) return;
+    if (data.label_objects === false) { boxEl.hidden = true; list.innerHTML = ""; return; }
     const dets = (data && data.detections) || {};
     const names = Object.keys(dets).sort();
     const total = names.reduce((n, k) => n + (dets[k] || []).length, 0);
     boxEl.hidden = false;
     list.innerHTML = "";
     if (!total) {
-      note.textContent = "No SAM stage ran — concepts were empty and no " +
-        "detections were supplied, so the cloud below is unlabeled.";
+      note.textContent = "No object detections were returned. The cloud below is unlabelled; check the reconstruction notes for any detector errors.";
       return;
     }
     note.textContent = `${total} box(es) from ${detector} across ` +
@@ -1148,6 +1197,7 @@
   function renderSfmSamImages(data) {
     const wrap = $("sfmImgWrap"), grid = $("sfmImgGrid");
     if (!wrap || !grid) return;
+    if (data.label_objects === false) { wrap.hidden = true; grid.innerHTML = ""; return; }
     const thumbs = (data && data.thumbnails) || {};
     const sizes = (data && data.image_sizes) || {};
     const orient = (data && data.orientations) || {};
@@ -1199,6 +1249,25 @@
     });
   }
 
+  function renderSfmCleanImages(data) {
+    const grid = $("sfmCleanGrid");
+    grid.innerHTML = "";
+    const thumbnails = Object.entries(data.thumbnails || {});
+    $("sfmCleanWrap").hidden = !thumbnails.length;
+    thumbnails.forEach(([name, url]) => {
+      const figure = document.createElement("figure");
+      figure.className = "sam-cell";
+      const image = document.createElement("img");
+      image.src = url;
+      image.alt = `Unlabelled COLMAP input: ${name}`;
+      image.loading = "lazy";
+      const caption = document.createElement("figcaption");
+      caption.textContent = name;
+      figure.append(image, caption);
+      grid.appendChild(figure);
+    });
+  }
+
   function sfmExportDownload() {
     if (!sfmData || !sfmLib) return;
     const pctEl = document.querySelector('input[name="expPct"]:checked');
@@ -1231,7 +1300,8 @@
   if (sfmBtn) sfmBtn.addEventListener("click", async () => {
     const zf = zipInput.files[0];
     if (!zf) { sfmOut.textContent = "Pick a zip of photos above first."; return; }
-    const concepts = setConcepts.value.split(",").map(s => s.trim()).filter(Boolean);
+    const wantLabels = $("sfmUseSam").checked;
+    const concepts = wantLabels ? setConcepts.value.split(",").map(s => s.trim()).filter(Boolean) : [];
     const wantDense = $("sfmDense") && $("sfmDense").checked;
     // Progress UI: bar + scrolling log of the live server lines, so a
     // long reconstruction reads as working, not crashed. Cleared here,
@@ -1239,7 +1309,7 @@
     const prog = $("sfmProg"), logBox = $("sfmLog");
     const logLines = [];
     const t0 = Date.now();
-    let stagePct = 5, stageLabel = concepts.length ? "Detecting labels" : "Reconstructing";
+    let stagePct = 5, stageLabel = "Reconstructing from unlabelled photos";
     let lastPaint = 0;
     const elapsed = () => `${Math.round((Date.now() - t0) / 1000)}s`;
     const paintProgress = () => {
@@ -1259,6 +1329,7 @@
     // Stage words from the server markers and raw COLMAP lines.
     const stageOf = (line) => {
       const l = line.toLowerCase();
+      if (l.includes("labelling copies")) return [97, "Labelling separate photo copies"];
       if (l.indexOf("undistort") >= 0) return [72, "Undistorting for dense stereo"];
       if (l.indexOf("patch_match") >= 0 || l.indexOf("dense stereo matching") >= 0) return [80, "Dense stereo matching"];
       if (l.indexOf("fus") >= 0) return [94, "Fusing depth maps"];
@@ -1269,6 +1340,7 @@
     };
     if ($("sfmSamBox")) $("sfmSamBox").hidden = true;
     if ($("sfmImgWrap")) $("sfmImgWrap").hidden = true;
+    $("sfmCleanWrap").hidden = true;
     if ($("sfmStats")) $("sfmStats").hidden = true;
     if ($("sfmWarn")) $("sfmWarn").hidden = true;
     sfmBtn.disabled = true;
@@ -1278,7 +1350,9 @@
       const fd = new FormData();
       fd.append("zipfile", zf);
       fd.append("concepts", JSON.stringify(concepts));
+      fd.append("label_objects", wantLabels ? "1" : "0");
       fd.append("detector", detectorUsed);
+      if (concepts.length) zipDetectorFields(fd);
       fd.append("dense", wantDense ? "1" : "0");
       fd.append("use_gpu", ($("sfmCpu") && $("sfmCpu").checked) ? "0" : "1");
       // The reply streams NDJSON: {type:"log"} lines while COLMAP
@@ -1326,11 +1400,16 @@
       }
       if (!data) throw new Error("the 3D stream ended before any result arrived");
       if (data.error) throw new Error(data.error);
+      sfmReport = {diagnostics: data.diagnostics, cameras: data.cameras,
+        registered: data.registered, unregistered: data.unregistered, warnings: data.warnings,
+        label_objects: data.label_objects, colmap_inputs_annotated: data.colmap_inputs_annotated};
+      $("sfmDiagnostics").disabled = false;
+      renderSfmMap(data);
+      renderSfmCleanImages(data);
       try {
         sfmLib = sfmLib || await import("./sfm3d.js");
       } catch (e) {
-        sfmOut.textContent = "3D data arrived, but the three.js library could not load " +
-          "(needs internet for the pinned CDN) — try again online.";
+        sfmOut.textContent = "3D data arrived, but the local viewer files could not load. Rebuild the container and refresh the page.";
         return;
       }
       // Dense cloud preferred; sparse fallback when stereo failed.
@@ -1351,7 +1430,7 @@
       const viewer = sfmEnsureViewer();
       viewer.setCloud(cloud.positions, cloud.colors,
         sfmLib.labeledColors(cloud.count, dense ? (data.dense_labels || {}) : (data.point_labels || {})),
-        labels, votes);
+        labels, votes, data.cameras || []);
       $("sfmEmpty").hidden = true;
       const unreg = (data.unregistered || []).length;
       const nLab = labels.filter(Boolean).length;
@@ -1365,7 +1444,7 @@
         (data.gpu_used ? " (GPU)." : ".") +
         ((data.warnings || []).length ? " See notes below." : "");
       renderSfmStats(data, cloud.count, dense, nLab);
-      renderSfmSam(data, detectorUsed === "clip" ? "Local CLIP" : "Server SAM 3");
+      renderSfmSam(data, detectorUsed === "api" ? "Meta API SAM 3.1" : detectorUsed === "clip" ? "Local CLIP" : "Server SAM 3");
       renderSfmSamImages(data);
     } catch (e) {
       sfmOut.textContent = `Error: ${e.message}`;

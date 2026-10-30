@@ -1,5 +1,58 @@
 # Microgeographies — SAM test PWA
 
+### Reconstruction and viewer update
+
+Version **0.15** replaces the previous viewer with a port of the main
+viewer in `E:\Data\Agents\Codex_workspace\SLAM\SLAM-image-1`.
+`view-navigation.js`, `view-roll.js`, `point-identify.js`,
+`viewer-annotations.js`, and the Three.js r180/OrbitControls files are
+copied from that app. `slam-viewer.js` adapts this app's point/color/label
+arrays to its camera, material, fit/top and render loop. Assets are served
+locally. The old custom framing, projection switching and drag-strip code
+have been removed. Fit view, Top, Reset roll and Expand viewer are available.
+
+Version **0.14** adds **Fit bounding box**, **Top**, **Photo view**,
+**Reset roll**, and zoom buttons. Fit uses all eight bounding-box corners
+and the viewport aspect ratio in both perspective and orthographic modes.
+Navigation defaults to Orbit. View roll is separate from OrbitControls'
+up direction, and points use a constant screen size with depth testing.
+While the canvas is focused, F fits the cloud, R resets roll, and +/− zoom.
+
+Version **0.13** adds an explicit **Use SAM / object labelling after
+reconstruction** checkbox, off by default. Geometry always uses clean,
+upright photos. Optional detection runs only after sparse/dense reconstruction
+and receives separate in-memory image copies. Clean input previews are read
+from the actual COLMAP files; browser annotations are drawn on separate
+canvases. The `/api/sfm` field `label_objects=1` enables labelling; its default
+is `0`, which ignores concepts and supplied detections and skips all label voting.
+
+The 3D viewer now uses a narrower 40° perspective lens, fits the cloud
+to the viewport aspect ratio, and offers an orthographic projection.
+The photo-location map beside it shows EXIF GPS, with registered photos
+in dark blue and unregistered photos in amber. The cloud remains in COLMAP's
+local frame: it is not aligned to north or calibrated to geographic metres.
+
+Upright photos retain their focal-length and GPS EXIF when written for
+COLMAP, with orientation removed and pixel dimensions corrected. Dense
+stereo explicitly enables geometric consistency and fuses the geometric
+depth maps. Dense processing needs CUDA; CPU requests return sparse geometry.
+
+Both ZIP routes now offer **Meta API · SAM 3.1**, using the entered token
+via the backend and the existing Meta Responses request format. Requests
+are sent to `https://api.meta.ai/v1/responses`; tokens are not included in
+results or logs. Original-pixel boxes are restored after API image resizing.
+This is box-based point labelling; pixel masks and occlusion-aware semantic
+fusion are not implemented. Server SAM remains available separately and
+`MOCK_SAM=1` produces demo boxes, identified in reconstruction notes.
+
+The monocular routes still use `LiheYoung/depth-anything-small-hf`, not
+Depth Anything V3. Their displayed metres are heuristic estimates, not
+metric calibration. These changes do not replace the depth model.
+
+Rebuild/restart Docker with `docker compose up --build -d` to use the changes.
+Real photo reconstruction and a live Meta request need validation on the
+Docker GPU host with your images and API key.
+
 Test page: upload a photo (or use the phone camera), type object prompts
 (`door, steps`), grab GPS, send to SAM 3.1, draw the returned bounding
 boxes, export GeoJSON for mapping later, and download a
@@ -145,14 +198,25 @@ Photos are normalised for COLMAP before extraction. COLMAP reads
 stored pixels and stored dimensions verbatim and ignores the EXIF
 orientation tag, so portrait phone photos (stored landscape, tagged
 rotated) are physically rotated upright and saved without the tag —
-each photo then gets its own COLMAP camera (forced on both the CLI and
-pycolmap paths), so a landscape frame's width/height and principal
-point can never be applied to a portrait photo. Zip entries sharing a
+COLMAP automatically shares calibration for matching EXIF camera/focal
+metadata and pixel dimensions, on both the CLI and pycolmap paths.
+Different portrait/landscape dimensions stay separate, while photos
+from the same camera can constrain one focal/distortion estimate.
+Zip entries sharing a
 filename in different folders are renamed (`name__2.jpg`, …) instead of
 overwriting each other, and the reply gains per-photo `orientations`.
 After parsing, every COLMAP camera is checked against the upright
 photo it claims to describe: a swapped or mismatched width/height adds
 an explicit warning rather than returning a silently warped cloud.
+
+The viewer initially faces the scene using the first registered camera's
+orientation. Dense stereo is bounded to 1600 pixels and fusion uses a
+minimum support count of 3, matching the comparison SLAM-image-1 app's
+defaults. Connected models are selected by registered-photo count before
+point count/size. Download diagnostics after a reconstruction to inspect
+camera calibration groups, focal/FOV estimates, sparse reprojection error,
+track lengths, and verified matches for every image pair. These diagnostics
+describe internal consistency; they do not certify geometric accuracy.
 
 The server unzips to a temp dir and runs COLMAP — CLI preferred
 (feature extraction + exhaustive matching + mapping), pycolmap fallback
