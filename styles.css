@@ -1,182 +1,1011 @@
-:root { color-scheme: light dark; --accent: #183b68; }
-* { box-sizing: border-box; }
-body {
-  margin: 0 auto; max-width: 720px; padding: 16px;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-  line-height: 1.45;
-}
-header {
-  background: #142b4a; color: #f3f5f8;
-  margin: -16px -16px 16px; padding: 16px 16px 12px;
-}
-header h1 { font-size: 1.25rem; margin: 0; letter-spacing: 0.01em; }
-header h1 .ver {
-  font-weight: 600; font-size: 0.75rem; vertical-align: middle;
-  border: 1px solid #ffffff66; border-radius: 999px; padding: 1px 8px; margin-left: 6px;
-}
-header .tagline { margin: 4px 0 0; font-size: 0.85rem; opacity: 0.8; }
-header p { margin: 0 0 12px; font-size: 0.85rem; }
-#secureNote { margin-top: 8px; font-size: 0.8rem; opacity: 0.75; }
-.card { border: 1px solid #8886; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
-.card h2 { font-size: 1rem; margin: 0 0 8px; }
-label { display: block; margin: 8px 0; font-size: 0.9rem; }
-label.row { display: flex; gap: 8px; align-items: center; }
-input[type="text"], input[type="password"], select { display: block; width: 100%; margin-top: 4px; padding: 8px; font-size: 1rem; }
-button { padding: 10px 16px; font-size: 1rem; margin: 6px 6px 6px 0; cursor: pointer; border-radius: 6px; border: 1px solid #8886; background: transparent; color: inherit; }
-button.primary { font-weight: 700; background: var(--accent); border-color: var(--accent); color: #fff; }
-button:disabled { opacity: 0.45; cursor: default; }
-.batch-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin-top: 8px; }
-.batch-item { border: 1px solid #8886; border-radius: 6px; padding: 8px; font-size: 0.85rem; }
-.batch-item img { width: 100%; border-radius: 4px; display: block; margin-bottom: 6px; }
-.batch-item h4 { margin: 0 0 4px; font-size: 0.9rem; overflow-wrap: anywhere; }
-.batch-item ul { margin: 4px 0; padding-left: 18px; }
-.batch-item button { padding: 6px 10px; font-size: 0.85rem; }
-.hint { font-size: 0.85rem; opacity: 0.75; }
-#photoCanvas { width: 100%; margin-top: 8px; border: 1px solid #8886; border-radius: 4px; }
-#boxList { padding-left: 20px; }
-#depthCanvas { width: 100%; margin-top: 8px; border: 1px solid #8886; border-radius: 4px; }
-#map { height: 320px; margin-top: 8px; border: 1px solid #8886; border-radius: 4px; }
-#rawOut { overflow-x: auto; font-size: 0.75rem; max-height: 240px; overflow-y: auto; }
-#statusOut { font-weight: 600; }
-.drop-zone {
-  border: 2px dashed #8888; border-radius: 6px; padding: 18px 12px;
-  margin-bottom: 8px; text-align: center; font-size: 0.9rem; cursor: pointer;
-}
-.drop-zone.over { border-color: var(--accent); background: #183b6822; }
-.sfm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px; }
-.sfm-cell h3 { margin: 0 0 4px; font-size: 0.9rem; }
-.sfm-wrap { position: relative; }
-.sfm-view { height: 300px; border: 1px solid #8886; border-radius: 4px; overflow: hidden; background: #101418; }
-.sfm-view canvas { width: 100%; height: 100%; }
-.sfm-empty { margin: 8px 0 0; }
-.sfm-popup {
-  position: absolute; z-index: 5; max-width: 220px;
-  background: #101418ee; color: #f3f5f8; border: 1px solid #8888;
-  border-radius: 6px; padding: 6px 10px; font-size: 0.8rem;
-  pointer-events: none;
-}
-#sfmOut { font-weight: 600; }
-/* Desktop 3D route: the page goes wide and the viewers grow with it.
- * Narrow screens keep the single-column phone layout below. */
-body.wide { max-width: 1100px; }
-body.wide .sfm-view { height: 480px; }
-.sfm-single { height: 420px; }
-body.wide .sfm-single { height: 560px; }
-.sfm-wrap { position: relative; }
-.sfm-toolbar { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
-.sfm-toolbar .tool { padding: 6px 14px; border: 1px solid #888; background: #f0f0f0; cursor: pointer; }
-.sfm-toolbar .tool.active { background: #222; color: #fff; border-color: #222; }
-/* SAM stage box: per-photo label output shown before the 3D view. */
-.sam-box { margin: 8px 0; border: 1px solid #8886; border-radius: 4px; padding: 8px 12px; }
-.sam-box h3 { margin: 0 0 4px; font-size: 0.9rem; }
-.sam-box ul { margin: 4px 0; padding-left: 20px; font-size: 0.85rem; }
-/* SAM image viewer: annotated photo thumbnails in a grid. */
-#sfmImgWrap h3 { margin: 12px 0 4px; font-size: 0.9rem; }
-.sam-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin: 4px 0 8px; }
-.sam-cell { margin: 0; }
-.sam-cell canvas { width: 100%; display: block; border: 1px solid #8886; border-radius: 4px; }
-.sam-cell img { width: 100%; display: block; border: 1px solid #8886; border-radius: 4px; }
-input:disabled, select:disabled { opacity: .55; cursor: not-allowed; }
-.sam-cell figcaption { font-size: 0.8rem; margin-top: 2px; }
-/* Reconstruction progress: bar plus a scrolling box of the live
- * server log (last 20 lines), so long runs read as working. */
-#sfmProg { width: 100%; margin: 6px 0 0; }
-.sfm-log { max-height: 12em; overflow-y: auto; background: #101418; color: #d4deed;
-  font-size: 0.75rem; line-height: 1.35; padding: 8px 10px; border-radius: 4px;
-  white-space: pre-wrap; word-break: break-word; margin: 6px 0; }
-/* Point-size slider sits in the toolbar above the 3D view. */
-.tool-slider { display: inline-flex; gap: 8px; align-items: center; font-size: 0.85rem; }
-.tool-slider input[type="range"] { width: 140px; }
-.sfm-view-wrap { position: relative; }
-/* Floating export dialog. */
-.sfm-dlg { position: absolute; z-index: 10; top: 52px; left: 12px; right: auto;
-  background: #fff; border: 1px solid #555; padding: 12px 16px; max-width: 420px; }
-.sfm-dlg h4 { margin: 0 0 4px; }
-.sfm-dlg-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
-@media (max-width: 560px) { .sfm-grid { grid-template-columns: 1fr; } }
-/* Focus and state visibility (keyboard users, status colours). */
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-button:hover:not(:disabled) { border-color: var(--accent); }
-#sfmBackend.ok { color: var(--accent); font-weight: 600; opacity: 1; }
-#sfmBackend.bad { color: #b00020; font-weight: 600; opacity: 1; }
-/* Reconstruction summary + notes, shown after a run. */
-.sfm-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 10px 0 4px; }
-.sfm-stats .stat { border: 1px solid #8886; border-radius: 6px; padding: 6px 10px; }
-.sfm-stats .stat-k { display: block; font-size: 0.75rem; opacity: 0.75; }
-.sfm-stats .stat-v { display: block; font-size: 0.95rem; font-weight: 600; overflow-wrap: anywhere; }
-.warn-list { margin: 8px 0; padding: 8px 12px 8px 28px; font-size: 0.85rem;
-  border: 1px solid #8886; border-radius: 6px; background: #b5890014; }
-.warn-list li { margin: 2px 0; }
-/* Per-photo placed / orientation caption in the SAM photo grid. */
-.sam-cell figcaption.not-placed { color: #b00020; font-weight: 600; }
-/* Toolbar and export dialog follow the colour scheme. */
-.sfm-toolbar .tool { color: #182c46; }
-@media (prefers-color-scheme: dark) {
-  .sfm-toolbar .tool { background: #253348; color: #f3f5f8; border-color: #888; }
-  .sfm-toolbar .tool.active { background: #f3f5f8; color: #182c46; border-color: #f3f5f8; }
-  .sfm-dlg { background: #1c293b; color: #f3f5f8; border-color: #888; }
-}
-@media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; scroll-behavior: auto !important; }
+/* MicroGeo Capture Tool v0.17 — "spatial computing / blueprint" aesthetic.
+ * Dark is the signature blueprint theme: deep navy, 24px grid, vignette,
+ * glass HUD panels with corner brackets, cyan/magenta luminous strokes.
+ * Light keeps the plain professional theme. Theme is driven by
+ * html[data-theme]; see the inline script in index.html + app.js. */
+
+:root {
+  --radius: 10px;
+  --radius-sm: 7px;
+  --font: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
 }
 
-/* Capture workspace */
-:root { color-scheme: light; --accent: #183b68; --ink: #1d2b40; --muted: #647084; }
-body { max-width: 1080px; padding: 28px; color: var(--ink); background: #eef0f3; }
-body.wide { max-width: 1480px; }
-header { margin: 0 0 24px; padding: 28px 32px; border-radius: 18px; background: #142b4a; }
-header h1 { font-size: 1.65rem; letter-spacing: -.04em; }
-header .tagline { margin-top: 10px; font-size: .95rem; }
-.card { padding: 24px; margin-bottom: 20px; border: 1px solid #d7dde5; border-radius: 14px; background: #fff; box-shadow: 0 4px 20px #172a4504; }
-.card h2 { font-size: 1.12rem; margin-bottom: 16px; }
-.hint { color: var(--muted); opacity: 1; line-height: 1.6; }
-input[type="text"], input[type="password"], input[type="number"], select {
-  border: 1px solid #cbd3de; border-radius: 8px; padding: 10px 12px; background: #f8f9fb; color: var(--ink); max-width: 100%;
+html[data-theme="light"] {
+  color-scheme: light;
+  --bg: #e9edf2;
+  --surface: #ffffff;
+  --surface-sunken: #f3f5f8;
+  --glass: rgb(255 255 255 / 0.86);
+  --toolbar-bg: #eef1f6;
+  --border: #d3dae4;
+  --border-strong: #b9c3d2;
+  --line: #b9c3d2;
+  --accent: #174a7c;
+  --accent-ink: #ffffff;
+  --accent-soft: #e7eef6;
+  --danger: #b00020;
+  --ink: #1d2b40;
+  --muted: #5b6a80;
+  --label: #3d5a80;
+  --input-bg: #f7f9fb;
+  --hover-bg: #f0f4f9;
+  --selected-bg: #e7eef6;
+  --warn-bg: #fef6e0;
+  --warn-border: #e3c97e;
+  --header-bg: #10233c;
+  --header-ink: #f2f5f9;
+  --code-bg: #101418;
+  --code-ink: #d4deed;
+  --shadow: 0 1px 2px rgb(20 43 74 / 0.07), 0 6px 22px rgb(20 43 74 / 0.07);
+  --glow: none;
+  --font-head: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
-input[type="number"] { display: block; margin-top: 5px; width: 100%; }
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --radius: 3px;
+  --radius-sm: 2px;
+  --bg: #050816;
+  --surface: rgb(255 255 255 / 0.04);
+  --surface-sunken: rgb(255 255 255 / 0.025);
+  --glass: rgb(5 8 22 / 0.72);
+  --toolbar-bg: rgb(5 8 22 / 0.72);
+  --border: rgb(56 189 248 / 0.22);
+  --border-strong: rgb(56 189 248 / 0.45);
+  --line: rgb(56 189 248 / 0.25);
+  --line-magenta: rgb(232 121 249 / 0.25);
+  --accent: #38bdf8;
+  --accent2: #e879f9;
+  --accent-ink: #04121f;
+  --accent-soft: rgb(56 189 248 / 0.12);
+  --danger: #ff8a9d;
+  --ink: #d9e6f7;
+  --muted: #9db2cc;
+  --label: #8fd8ff;
+  --input-bg: rgb(255 255 255 / 0.03);
+  --hover-bg: rgb(56 189 248 / 0.08);
+  --selected-bg: rgb(56 189 248 / 0.12);
+  --warn-bg: rgb(43 36 16 / 0.85);
+  --warn-border: #8a742f;
+  --header-bg: transparent;
+  --header-ink: #eaf3ff;
+  --code-bg: #04070f;
+  --code-ink: #c9d9ee;
+  --shadow: 0 2px 18px rgb(0 0 0 / 0.5);
+  --glow: 0 0 14px rgb(56 189 248 / 0.35);
+  --font-head: "Space Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0 auto;
+  max-width: 1080px;
+  padding: 28px;
+  font-family: var(--font);
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--bg);
+}
+body.wide { max-width: 1480px; }
+
+/* Blueprint grid + vignette (dark only). The vignette sits behind the
+ * content layers so it never dims text. */
+html[data-theme="dark"] body {
+  background-image:
+    linear-gradient(rgb(56 189 248 / 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(56 189 248 / 0.055) 1px, transparent 1px);
+  background-size: 24px 24px;
+  background-attachment: fixed;
+}
+html[data-theme="dark"] body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 38%, transparent 42%, rgb(2 4 12 / 0.6) 100%);
+}
+html[data-theme="dark"] header,
+html[data-theme="dark"] main { position: relative; z-index: 1; }
+
+/* Visually-hidden (icon button labels, still read by AT). */
+.vh {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---- App bar ---- */
+header.appbar {
+  margin: 0 0 22px;
+  padding: 20px 24px;
+  border-radius: 14px;
+  background: var(--header-bg);
+  color: var(--header-ink);
+  box-shadow: var(--shadow);
+}
+html[data-theme="dark"] header.appbar {
+  border-radius: var(--radius);
+  background: var(--surface);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+.appbar-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+header h1 {
+  font-family: var(--font-head);
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+html[data-theme="dark"] header h1 { font-size: 1.7rem; font-weight: 300; letter-spacing: 0; }
+header h1 .ver {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 0.72rem;
+  vertical-align: middle;
+  border: 1px solid rgb(255 255 255 / 0.35);
+  border-radius: 999px;
+  padding: 1px 9px;
+  margin-left: 8px;
+  white-space: nowrap;
+}
+html[data-theme="dark"] header h1 .ver { border-color: var(--line); color: var(--label); }
+header .tagline { margin: 6px 0 0; font-size: 0.9rem; opacity: 0.82; }
+.appbar-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.secure-pill {
+  font-size: 0.75rem;
+  border: 1px solid rgb(255 255 255 / 0.28);
+  border-radius: 999px;
+  padding: 3px 11px;
+  margin: 0;
+  opacity: 0.9;
+  white-space: nowrap;
+}
+html[data-theme="dark"] .secure-pill { border-color: var(--line); font-family: var(--font-mono); font-size: 0.7rem; }
+.theme-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 7px 13px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--header-ink);
+  background: transparent;
+  border: 1px solid rgb(255 255 255 / 0.35);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.theme-btn:hover { background: rgb(255 255 255 / 0.1); border-color: rgb(255 255 255 / 0.6); }
+html[data-theme="dark"] .theme-btn { border-color: var(--border-strong); color: #eaf4ff; }
+html[data-theme="dark"] .theme-btn:hover { box-shadow: var(--glow); background: var(--hover-bg); }
+.theme-btn svg { width: 15px; height: 15px; flex-shrink: 0; }
+.theme-btn .moon { display: none; }
+html[data-theme="dark"] .theme-btn .moon { display: inline; }
+html[data-theme="dark"] .theme-btn .sun { display: none; }
+
+/* ---- Cards & sections ---- */
+.card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px 24px;
+  margin-bottom: 18px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+html[data-theme="dark"] .card {
+  border-color: transparent;
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+.card h2 {
+  font-family: var(--font-head);
+  font-size: 1.05rem;
+  font-weight: 650;
+  margin: 0 0 12px;
+  letter-spacing: -0.01em;
+}
+html[data-theme="dark"] .card h2 { font-size: 1.3rem; font-weight: 300; letter-spacing: 0; }
+.card h3 { font-size: 0.9rem; font-weight: 650; margin: 18px 0 6px; }
+.card h3:first-of-type { margin-top: 14px; }
+html[data-theme="dark"] .card h3 {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--label);
+}
+
+/* HUD corner brackets (dark): cyan TL+BR, magenta TR+BL, no full border. */
+html[data-theme="dark"] .card,
+html[data-theme="dark"] header.appbar,
+html[data-theme="dark"] .hud-panel,
+html[data-theme="dark"] .sfm-toolbar,
+html[data-theme="dark"] .sfm-dlg,
+html[data-theme="dark"] .sam-box {
+  background-image:
+    linear-gradient(var(--line), var(--line)),
+    linear-gradient(var(--line), var(--line)),
+    linear-gradient(var(--line-magenta), var(--line-magenta)),
+    linear-gradient(var(--line-magenta), var(--line-magenta)),
+    linear-gradient(var(--line), var(--line)),
+    linear-gradient(var(--line), var(--line)),
+    linear-gradient(var(--line-magenta), var(--line-magenta)),
+    linear-gradient(var(--line-magenta), var(--line-magenta));
+  background-repeat: no-repeat;
+  background-size:
+    18px 1px, 1px 18px,
+    18px 1px, 1px 18px,
+    18px 1px, 1px 18px,
+    18px 1px, 1px 18px;
+  background-position:
+    left top, left top,
+    right top, right top,
+    right bottom, right bottom,
+    left bottom, left bottom;
+}
+
+.hint { font-size: 0.84rem; color: var(--muted); line-height: 1.6; }
+.hint p, p.hint { margin: 8px 0; }
+
+label { display: block; margin: 10px 0; font-size: 0.9rem; }
+label.row { display: flex; gap: 9px; align-items: center; }
+
+input[type="text"], input[type="password"], input[type="number"], select {
+  display: block;
+  width: 100%;
+  margin-top: 5px;
+  padding: 9px 12px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  color: var(--ink);
+  background: var(--input-bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+html[data-theme="dark"] input[type="text"],
+html[data-theme="dark"] input[type="password"],
+html[data-theme="dark"] input[type="number"],
+html[data-theme="dark"] select { font-family: var(--font-mono); font-size: 0.85rem; }
+input[type="file"] { font-size: 0.9rem; margin: 4px 0; max-width: 100%; }
 input[type="radio"], input[type="checkbox"], input[type="range"] { accent-color: var(--accent); }
-button { background: #fff; border-color: #cbd3de; font-size: .9rem; border-radius: 8px; }
-button.primary { padding: 12px 22px; }
+input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Buttons hide overflow for the shimmer sweep, so focus uses a ring. */
+html[data-theme="dark"] :focus-visible { outline: none; box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent); }
+
+/* ---- Buttons ---- */
+button {
+  padding: 9px 16px;
+  font-size: 0.88rem;
+  font-weight: 550;
+  font-family: inherit;
+  margin: 6px 8px 6px 0;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--ink);
+}
+button:hover:not(:disabled) { background: var(--hover-bg); border-color: var(--accent); }
+button.primary {
+  font-weight: 700;
+  padding: 11px 22px;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+html[data-theme="light"] button.primary { background: #174a7c; border-color: #174a7c; color: #fff; }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+button:disabled { opacity: 0.45; cursor: default; }
+
+html[data-theme="dark"] button {
+  color: #eaf4ff;
+  background: rgb(56 189 248 / 0.06);
+  border-color: var(--line);
+}
+html[data-theme="dark"] button:hover:not(:disabled) {
+  background: var(--hover-bg);
+  border-color: var(--accent);
+  box-shadow: var(--glow);
+}
+html[data-theme="dark"] button.primary {
+  background: rgb(56 189 248 / 0.16);
+  border-color: rgb(56 189 248 / 0.6);
+  color: #fff;
+  box-shadow: 0 0 12px rgb(56 189 248 / 0.25);
+  filter: none;
+}
+html[data-theme="dark"] button.primary:hover:not(:disabled) {
+  background: rgb(56 189 248 / 0.24);
+  box-shadow: 0 0 18px rgb(56 189 248 / 0.45);
+}
+/* Scanning-line shimmer sweep on hover (dark only). */
+html[data-theme="dark"] button:not(:disabled) { position: relative; overflow: hidden; }
+html[data-theme="dark"] button:not(:disabled)::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  width: 45%;
+  background: linear-gradient(100deg, transparent, rgb(255 255 255 / 0.16), transparent);
+  transform: translateX(-130%) skewX(-18deg);
+  pointer-events: none;
+}
+html[data-theme="dark"] button:not(:disabled):hover::after { animation: hud-scan 0.7s linear; }
+@keyframes hud-scan { to { transform: translateX(330%) skewX(-18deg); } }
+
+/* ---- Mode picker ---- */
 #modeCard { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 #modeCard h2, #modeOut { grid-column: 1 / -1; margin: 0; }
-#modeCard label { margin: 0; padding: 18px; border: 1px solid #d7dde5; border-radius: 10px; align-items: flex-start; cursor: pointer; }
-#modeCard label:has(input:checked) { background: #eaf0f8; border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-.drop-zone { padding: 32px 20px; background: #f5f7fa; border-color: #a1b0c5; border-radius: 10px; }
-.sfm-toolbar { align-items: center; padding: 10px; background: #edf1f6; border-radius: 10px; gap: 8px; }
-.sfm-toolbar .tool { background: #fff; color: var(--ink); border-color: #cbd3de; }
-.sfm-toolbar .tool.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-.sfm-toolbar .tool.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 700; }
-.tool-slider { margin: 0; }
-.tool-slider select { width: auto; margin: 0; padding: 6px; font-size: .82rem; }
-.tool-slider input[type="range"] { width: 90px; }
-.reconstruction-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; margin-top: 16px; }
-.sfm-view-wrap { min-width: 0; }
-body.wide .sfm-single { height: 560px; }
-.sfm-view { border-radius: 10px; }
-.sfm-view { position: relative; }
-.identify-tooltip { position:absolute; z-index:9; padding:7px 10px; border:1px solid #7185a2; border-radius:6px; background:#142b4aee; color:#fff; font-size:12px; pointer-events:none; max-width:260px; }
-.sfm-wrap.expanded { position:fixed; inset:12px; z-index:1000; background:#eef0f3; padding:12px; border:1px solid #cbd3de; border-radius:12px; display:flex; flex-direction:column; }
-.sfm-wrap.expanded .reconstruction-layout { flex:1; min-height:0; margin-top:4px; }
-.sfm-wrap.expanded .sfm-view-wrap { min-height:0; }
-.sfm-wrap.expanded .sfm-single { height:100% !important; }
-.sfm-wrap.expanded .survey-map { overflow:auto; }
-.viewer-expanded { overflow:hidden; }
-.survey-map { padding: 16px; border: 1px solid #d7dde5; border-radius: 10px; background: #f5f7fa; }
-.survey-map h3 { font-size: .95rem; margin: 0; }
-.survey-map .hint { font-size: .8rem; }
-#sfmMap { height: 350px; background: #e3e8ef; border-radius: 8px; z-index: 0; }
-.sfm-dlg { background: #fff; color: var(--ink); border-color: #cbd3de; border-radius: 10px; box-shadow: 0 12px 30px #0002; }
-.sfm-stats .stat { background: #f5f7fa; border-color: #d7dde5; padding: 12px; }
+#modeCard label {
+  margin: 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  align-items: flex-start;
+  cursor: pointer;
+  background: var(--surface-sunken);
+  font-size: 0.86rem;
+}
+#modeCard label:hover { border-color: var(--accent); }
+#modeCard label:has(input:checked) {
+  background: var(--selected-bg);
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+html[data-theme="dark"] #modeCard label:has(input:checked) { box-shadow: inset 0 0 0 1px var(--accent), var(--glow); }
+
+/* ---- Media & results ---- */
+#photoCanvas, #depthCanvas {
+  width: 100%;
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: block;
+}
+#boxList { padding-left: 0; list-style: none; margin: 8px 0; }
+#boxList li {
+  padding: 7px 2px;
+  font-size: 0.87rem;
+  border-bottom: 1px solid var(--border);
+}
+#boxList li:last-child { border-bottom: none; }
+#map {
+  height: 320px;
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  z-index: 0;
+}
+#rawOut {
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  max-height: 240px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+details summary { cursor: pointer; font-size: 0.88rem; font-weight: 600; margin: 10px 0 6px; }
+#statusOut, #sfmOut, #batchOut { font-weight: 600; font-size: 0.9rem; }
+html[data-theme="dark"] #statusOut,
+html[data-theme="dark"] #sfmOut,
+html[data-theme="dark"] #batchOut,
+html[data-theme="dark"] #gpsOut,
+html[data-theme="dark"] #headingOut,
+html[data-theme="dark"] #exifOut,
+html[data-theme="dark"] #boxList,
+html[data-theme="dark"] #mergedList { font-family: var(--font-mono); font-size: 0.8rem; font-weight: 400; }
+.status-error { color: var(--danger) !important; }
+
+/* Leaflet chrome follows the theme; dark map tiles are dimmed so the
+ * minimap sits inside the HUD instead of glowing white. Markers live in
+ * the overlay pane and keep their day colors. */
+.leaflet-container { font-family: inherit; }
+html[data-theme="dark"] .leaflet-container { background: #04070f; }
+html[data-theme="dark"] #map .leaflet-tile-pane,
+html[data-theme="dark"] #sfmMap .leaflet-tile-pane {
+  filter: invert(1) hue-rotate(190deg) saturate(0.65) brightness(0.95);
+}
+html[data-theme="dark"] .leaflet-bar a {
+  background: #0d1626;
+  color: #cfe6ff;
+  border-color: var(--line);
+}
+html[data-theme="dark"] .leaflet-control-attribution {
+  background: rgb(5 8 22 / 0.7) !important;
+  color: #8fa5c0 !important;
+  font-size: 9px;
+}
+html[data-theme="dark"] .leaflet-control-attribution a { color: #7fb8e8 !important; }
+html[data-theme="dark"] .leaflet-popup-content-wrapper,
+html[data-theme="dark"] .leaflet-popup-tip { background: #0d1626; color: #d9e6f7; }
+
+/* ---- Zip drop zone & batch ---- */
+.drop-zone {
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 30px 20px;
+  margin-bottom: 8px;
+  text-align: center;
+  font-size: 0.9rem;
+  cursor: pointer;
+  background: var(--surface-sunken);
+}
+.drop-zone.over { border-color: var(--accent); background: var(--accent-soft); }
+.batch-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; margin-top: 10px; }
+.batch-item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  font-size: 0.84rem;
+  background: var(--surface-sunken);
+}
+.batch-item img { width: 100%; border-radius: 5px; display: block; margin-bottom: 6px; }
+.batch-item h4 { margin: 0 0 4px; font-size: 0.88rem; overflow-wrap: anywhere; }
+.batch-item ul { margin: 4px 0; padding-left: 18px; }
+.batch-item button { padding: 6px 10px; font-size: 0.82rem; }
+#mergedList { padding-left: 20px; font-size: 0.87rem; }
+
+/* ================= 3D STAGE (viewport + side console) =================
+ * The viewport keeps the left; Display / minimap / telemetry live in a
+ * static side console on the right, and the icon toolbar is a static bar
+ * above the stage. Nothing floats over the canvas except the empty-state
+ * note (centred on the viewport) and the point tooltip.
+ * All wiring is by element id, so this is pure presentation. */
+.sfm-wrap { position: relative; display: flex; flex-direction: column; gap: 10px; }
+.sfm-stage { display: grid; grid-template-columns: minmax(0, 1fr) 288px; gap: 10px; align-items: start; }
+.sfm-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+#sfmViewWrap {
+  position: relative;
+  height: min(72vh, 660px);
+  min-height: 440px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: #04070f;
+}
+html[data-theme="dark"] #sfmViewWrap { border-color: transparent; }
+/* Bracket overlay above the WebGL canvas (which would cover plain
+ * background brackets on the wrapper itself). */
+html[data-theme="dark"] #sfmViewWrap::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--line), var(--line)),
+    linear-gradient(var(--line), var(--line)),
+    linear-gradient(var(--line-magenta), var(--line-magenta)),
+    linear-gradient(var(--line-magenta), var(--line-magenta)),
+    linear-gradient(var(--line), var(--line)),
+    linear-gradient(var(--line), var(--line)),
+    linear-gradient(var(--line-magenta), var(--line-magenta)),
+    linear-gradient(var(--line-magenta), var(--line-magenta));
+  background-repeat: no-repeat;
+  background-size:
+    22px 1px, 1px 22px,
+    22px 1px, 1px 22px,
+    22px 1px, 1px 22px,
+    22px 1px, 1px 22px;
+  background-position:
+    left top, left top,
+    right top, right top,
+    right bottom, right bottom,
+    left bottom, left bottom;
+}
+.sfm-view { position: absolute; inset: 0; height: 100%; overflow: hidden; background: #101418; }
+.sfm-view canvas { width: 100%; height: 100%; display: block; }
+
+/* Side-console glass panels. They sit beside the viewport in normal flow;
+ * the dark glass + corner brackets keep the HUD feel without covering
+ * the cloud. */
+.hud-panel {
+  position: static;
+  width: auto;
+  max-height: none;
+  overflow: visible;
+  padding: 12px 14px 8px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}
+html[data-theme="dark"] .hud-panel { border-color: transparent; }
+.hud-title {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--label);
+  margin: 0 0 6px;
+}
+.hud-panel .hud-title:not(:first-child) { margin-top: 12px; }
+.hud-panel .hint { font-size: 0.76rem; margin: 6px 0; }
+
+/* Display controls stack vertically in the left panel. */
+.hud-left .tool-slider { display: block; margin: 8px 0; font-size: 0.8rem; }
+.hud-left .tool-slider select { width: 100%; margin-top: 4px; font-size: 0.82rem; padding: 7px 9px; }
+.hud-left .tool-slider input[type="range"] { width: 100%; margin-top: 6px; }
+#sfmPointSizeVal { font-family: var(--font-mono); }
+
+/* Minimap + telemetry (right panel). */
+#sfmMap {
+  height: 182px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  z-index: 0;
+}
+.hud-right .sfm-stats { grid-template-columns: 1fr 1fr; gap: 6px; margin: 6px 0; }
+.hud-right .sfm-stats .stat { padding: 7px 9px; }
+.hud-right .sfm-stats .stat-v { font-size: 0.8rem; }
+
+/* Icon toolbar: a static bar above the stage. */
+.sfm-toolbar {
+  position: static;
+  align-self: flex-start;
+  max-width: 100%;
+  flex-wrap: wrap;
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  padding: 8px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}
+html[data-theme="dark"] .sfm-toolbar { border-color: transparent; }
+.sfm-toolbar .tool {
+  width: 36px;
+  height: 36px;
+  margin: 0;
+  padding: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.sfm-toolbar .tool svg { width: 100%; height: 100%; }
+.sfm-toolbar .tool.active {
+  background: var(--selected-bg);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+html[data-theme="dark"] .sfm-toolbar .tool.active {
+  color: #fff;
+  background: rgb(56 189 248 / 0.2);
+  box-shadow: var(--glow);
+}
+html[data-theme="dark"] .sfm-toolbar .tool.primary { border-color: rgb(56 189 248 / 0.6); }
+
+/* Empty-state overlay, centred on the viewport (it lives inside #sfmViewWrap). */
+.sfm-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  margin: 0;
+  padding: 0 24px;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+.sfm-popup {
+  position: absolute;
+  z-index: 9;
+  max-width: 230px;
+  background: rgb(16 20 24 / 0.93);
+  color: #f3f5f8;
+  border: 1px solid #8888;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.8rem;
+  pointer-events: none;
+}
+html[data-theme="dark"] .sfm-popup {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  background: rgb(5 8 22 / 0.92);
+  border-color: var(--border-strong);
+}
+.identify-tooltip {
+  position: absolute;
+  z-index: 9;
+  padding: 7px 10px;
+  border: 1px solid #7185a2;
+  border-radius: 6px;
+  background: rgb(20 43 74 / 0.93);
+  color: #fff;
+  font-size: 12px;
+  pointer-events: none;
+  max-width: 260px;
+}
+html[data-theme="dark"] .identify-tooltip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border-color: var(--border-strong);
+  background: rgb(5 8 22 / 0.92);
+}
+
+/* Theatre mode: the stage breaks out of the narrow page column toward full
+ * viewport width, but stays in the document flow so the page scrolls
+ * normally (like YouTube theatre). The extra width goes to the viewport;
+ * the side console keeps its width. */
+.sfm-wrap.expanded {
+  width: 1600px;
+  max-width: calc(100vw - 24px);
+  margin-left: auto;
+  margin-right: auto;
+}
+.sfm-wrap.expanded #sfmViewWrap { height: min(80vh, 780px); }
+/* Clip the breakout's horizontal overflow only; the page keeps scrolling. */
+.viewer-expanded { overflow-x: hidden; }
+
+/* ---- Reconstruction progress + log ---- */
+#sfmProg { width: 100%; margin: 6px 0 0; accent-color: var(--accent); }
+/* Segmented HUD bar (dark): the fill is discrete cyan cells. */
+html[data-theme="dark"] #sfmProg {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 12px;
+  background: rgb(56 189 248 / 0.08);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  accent-color: auto;
+}
+html[data-theme="dark"] #sfmProg::-webkit-progress-bar { background: transparent; }
+html[data-theme="dark"] #sfmProg::-webkit-progress-value {
+  background: repeating-linear-gradient(90deg, var(--accent) 0 7px, transparent 7px 10px);
+}
+html[data-theme="dark"] #sfmProg::-moz-progress-bar {
+  background: repeating-linear-gradient(90deg, var(--accent) 0 7px, transparent 7px 10px);
+}
+.sfm-log {
+  max-height: 12em;
+  overflow-y: auto;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  line-height: 1.4;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 6px 0;
+}
+
+/* ---- SAM stage ---- */
+.sam-box {
+  margin: 10px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  background: var(--surface-sunken);
+}
+html[data-theme="dark"] .sam-box { border-color: transparent; background: var(--surface); }
+.sam-box h3 { margin: 0 0 4px; font-size: 0.9rem; }
+.sam-box ul { margin: 4px 0; padding-left: 20px; font-size: 0.85rem; }
+html[data-theme="dark"] .sam-box ul { font-family: var(--font-mono); font-size: 0.76rem; }
+/* The per-photo label list scrolls inside a capped box so a long
+ * detection list never pushes the 3D view down the page. */
+#sfmSamList { max-height: 220px; overflow-y: auto; }
+#sfmImgWrap h3, #sfmCleanWrap h3 { margin: 12px 0 4px; font-size: 0.9rem; }
+.sam-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin: 4px 0 8px; }
+.sam-cell { margin: 0; }
+.sam-cell canvas, .sam-cell img {
+  width: 100%;
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.sam-cell figcaption { font-size: 0.79rem; margin-top: 3px; color: var(--muted); }
+html[data-theme="dark"] .sam-cell figcaption { font-family: var(--font-mono); font-size: 0.7rem; }
+.sam-cell figcaption.not-placed { color: var(--danger); font-weight: 600; }
+
+/* ---- Stats + warnings + export dialog ---- */
+.sfm-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 10px 0 4px; }
+.sfm-stats .stat { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--surface-sunken); }
+.sfm-stats .stat-k {
+  display: block;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+html[data-theme="dark"] .sfm-stats .stat-k {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--label);
+}
+.sfm-stats .stat-v { display: block; font-size: 0.93rem; font-weight: 650; overflow-wrap: anywhere; }
+html[data-theme="dark"] .sfm-stats .stat-v { font-family: var(--font-mono); font-weight: 400; font-size: 0.85rem; }
+.warn-list {
+  margin: 8px 0;
+  padding: 8px 12px 8px 30px;
+  font-size: 0.84rem;
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius-sm);
+  background: var(--warn-bg);
+}
+.sfm-dlg {
+  position: absolute;
+  z-index: 10;
+  top: 52px;
+  left: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 14px 18px;
+  max-width: 420px;
+}
+html[data-theme="dark"] .sfm-dlg {
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border-color: transparent;
+}
+.sfm-dlg h4 { margin: 0 0 4px; font-size: 0.95rem; }
+html[data-theme="dark"] .sfm-dlg h4 { font-family: var(--font-head); font-weight: 300; font-size: 1.1rem; }
+.sfm-dlg-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0; font-size: 0.87rem; }
+html[data-theme="dark"] .sfm-dlg-row { font-family: var(--font-mono); font-size: 0.78rem; }
+
+/* Backend status line */
+#sfmBackend.ok { color: var(--accent); font-weight: 600; }
+#sfmBackend.bad { color: var(--danger); font-weight: 600; }
+html[data-theme="dark"] #sfmBackend { font-family: var(--font-mono); font-size: 0.78rem; }
+
+/* ---- Single-photo console (v0.21) ----
+ * Desktop single mode is a fixed console, not a scrolling page: the five
+ * workflow cards sit in a strip (~1/4 of the freed height) and the view
+ * stage fills the rest (~3/4) with photo + depth side by side on the
+ * left and the map on the right. Crowded cards scroll internally so the
+ * image and map stay visible without page scrolling. Other modes and
+ * narrow screens keep the stacked scrolling layout. */
+.console-left { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.console-pane { margin: 0; min-width: 0; }
+.console-pane figcaption { font-size: 0.9rem; font-weight: 650; margin: 0 0 6px; }
+.console-pane figcaption .hint { font-weight: 400; margin-left: 8px; }
+html[data-theme="dark"] .console-pane figcaption {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--label);
+}
+#secStage #map { height: 320px; }
+
+body[data-mode="single"] {
+  max-width: none;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 16px 20px;
+}
+body[data-mode="single"] main {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-rows: auto minmax(0, 1fr) minmax(0, 3fr);
+  gap: 10px;
+}
+body[data-mode="single"] #modeCard {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  margin-bottom: 0;
+  padding: 8px 12px;
+  gap: 8px;
+  align-items: center;
+}
+body[data-mode="single"] #modeCard h2 { font-size: 0.85rem; }
+body[data-mode="single"] #modeCard label { padding: 6px 10px; font-size: 0.78rem; }
+body[data-mode="single"] #modeOut { font-size: 0.75rem; }
+body[data-mode="single"] .card h2 { font-size: 0.95rem; margin-bottom: 8px; }
+body[data-mode="single"] #secPhoto,
+body[data-mode="single"] #secObjects,
+body[data-mode="single"] #secDetector,
+body[data-mode="single"] #secResults,
+body[data-mode="single"] #secMatch {
+  grid-row: 2;
+  margin-bottom: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px;
+}
+body[data-mode="single"] #secStage {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  margin-bottom: 0;
+  min-height: 0;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+body[data-mode="single"] .console-left { min-height: 0; min-width: 0; }
+body[data-mode="single"] .console-right { min-height: 0; min-width: 0; display: flex; }
+body[data-mode="single"] .console-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+body[data-mode="single"] .console-pane figcaption { flex: none; }
+body[data-mode="single"] #photoCanvas,
+body[data-mode="single"] #depthCanvas {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  margin-top: 0;
+  object-fit: contain;
+  background: #000;
+}
+body[data-mode="single"] #secStage #map { flex: 1; min-height: 0; height: auto; margin-top: 0; }
+
+/* Narrow screens: the console unfolds into the normal scrolling page. */
+@media (max-width: 950px) {
+  body[data-mode="single"] { height: auto; display: block; overflow: visible; max-width: 1080px; }
+  body[data-mode="single"] main { display: block; }
+  body[data-mode="single"] #modeCard { grid-template-columns: 1fr; padding: 18px; margin-bottom: 18px; }
+  body[data-mode="single"] #modeCard h2 { font-size: 1.05rem; }
+  body[data-mode="single"] #modeCard label { padding: 12px; font-size: 0.86rem; }
+  body[data-mode="single"] .card h2 { font-size: 1.05rem; margin-bottom: 12px; }
+  body[data-mode="single"] #secPhoto,
+  body[data-mode="single"] #secObjects,
+  body[data-mode="single"] #secDetector,
+  body[data-mode="single"] #secResults,
+  body[data-mode="single"] #secMatch,
+  body[data-mode="single"] #secStage { margin-bottom: 18px; overflow: visible; padding: 18px; }
+  body[data-mode="single"] #secStage { display: block; }
+  body[data-mode="single"] .console-left { grid-template-columns: 1fr; }
+  body[data-mode="single"] .console-right { margin-top: 12px; display: block; }
+  body[data-mode="single"] .console-pane { display: block; }
+  body[data-mode="single"] #photoCanvas,
+  body[data-mode="single"] #depthCanvas { height: auto; }
+  body[data-mode="single"] #secStage #map { height: 50vh; }
+}
+
+/* ---- Photo + video workflow (v0.23) ---- */
+.video-viewer #videoView { height: 420px; }
+#videoMap { height: 320px; border: 1px solid var(--border-strong); border-radius: var(--radius); margin-top: 10px; }
+#videoFeatures { padding-left: 0; list-style: none; margin: 8px 0; max-height: 160px; overflow-y: auto; }
+#videoFeatures li { padding: 6px 2px; font-size: 0.85rem; border-bottom: 1px solid var(--border); }
+#videoFeatures li:last-child { border-bottom: none; }
+html[data-theme="dark"] #videoFeatures { font-family: var(--font-mono); font-size: 0.76rem; }
+
+/* ---- Setup / location dialogs (v0.22) ---- */
+.mg-dlg {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  padding: 18px 22px;
+  max-width: min(560px, 92vw);
+  max-height: 88vh;
+  overflow-y: auto;
+  box-shadow: var(--shadow);
+}
+.mg-dlg::backdrop { background: rgb(2 4 12 / 0.55); }
+html[data-theme="dark"] .mg-dlg { border-color: var(--line); background: #0a1224; }
+.dlg-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.dlg-head h2 { margin: 0; font-size: 1.05rem; }
+.dlg-head button { margin: 0; padding: 6px 12px; }
+.mg-dlg h3 { font-size: 0.9rem; margin: 16px 0 4px; }
+html[data-theme="dark"] .mg-dlg h3 {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--label);
+}
+
+/* ---- Export menu (v0.22): one compact button, two actions ---- */
+.export-wrap { position: relative; display: inline-block; }
+.export-menu {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  bottom: calc(100% + 4px);
+  min-width: 190px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  padding: 4px;
+}
+html[data-theme="dark"] .export-menu { background: #0d1626; border-color: var(--line); }
+.export-menu button { display: block; width: 100%; margin: 0; border: none; background: none; text-align: left; }
+.export-menu button:hover { background: var(--hover-bg); }
+
+/* ---- Map-match list (v0.22): capped + scrollable like the SAM list ---- */
+#matchList { padding-left: 0; list-style: none; margin: 8px 0; max-height: 160px; overflow-y: auto; }
+#matchList li { padding: 6px 2px; font-size: 0.85rem; border-bottom: 1px solid var(--border); }
+#matchList li:last-child { border-bottom: none; }
+html[data-theme="dark"] #matchList { font-family: var(--font-mono); font-size: 0.76rem; }
+
+/* ---- Measure tool + hover readouts (v0.22) ---- */
+.mini-btn { padding: 2px 10px; font-size: 0.78rem; margin: 0 4px; vertical-align: middle; }
+.mini-btn.active { border-color: var(--accent); background: var(--selected-bg); font-weight: 700; }
+.measure-tag {
+  background: #0b1526;
+  color: #7dd3fc;
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 1px 7px;
+  border: 1px solid #0ea5e9;
+  border-radius: 9px;
+  white-space: nowrap;
+}
+.measure-tag.measure-total { background: #0ea5e9; color: #04121f; font-weight: 700; }
+#hoverTip {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 3px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  max-width: 60vw;
+}
+
 [hidden] { display: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+
+/* Narrow screens: the side console stacks below the viewport. */
+@media (max-width: 700px) {
+  .sfm-stage { grid-template-columns: 1fr; }
+  #sfmViewWrap { height: 62vh; min-height: 340px; }
+  .hud-right .sfm-stats { grid-template-columns: 1fr 1fr; }
+  .sfm-toolbar { align-self: center; justify-content: center; }
+}
 @media (max-width: 900px) {
-  .reconstruction-layout { grid-template-columns: 1fr; }
-  #sfmMap { height: 280px; }
+  #sfmMap { height: 170px; }
 }
 @media (max-width: 640px) {
   body { padding: 12px; }
-  header { padding: 22px; }
+  header.appbar { padding: 16px 18px; border-radius: 12px; }
+  html[data-theme="dark"] header.appbar { border-radius: var(--radius); }
+  header h1 { font-size: 1.15rem; }
+  html[data-theme="dark"] header h1 { font-size: 1.35rem; }
+  .appbar-row { flex-direction: column; align-items: stretch; }
+  .appbar-actions { justify-content: space-between; }
+  .secure-pill { white-space: normal; }
   .card { padding: 18px; }
   #modeCard { grid-template-columns: 1fr; }
   #modeCard label { padding: 12px; }
-  body.wide .sfm-single { height: 420px; }
 }

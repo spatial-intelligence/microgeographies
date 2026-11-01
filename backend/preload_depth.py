@@ -31,7 +31,10 @@ def main():
     if os.getenv("MOCK_DEPTH") == "1":
         print("MOCK_DEPTH=1 — no weights needed.")
         return 0
-    print("model:", depth.DEFAULT_DEPTH_MODEL)
+    use = depth.resolve_depth_backend(None, None)
+    print("depth backend:", use)
+    print("model:", depth.DEFAULT_YOLO_DEPTH_MODEL if use == "yolo"
+          else depth.DEFAULT_DEPTH_MODEL)
     home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
     print("cache:", home)
     from PIL import Image

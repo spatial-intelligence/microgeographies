@@ -3,9 +3,23 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>MicroGeo Capture Tool v0.15</title>
+  <title>MicroGeo Capture Tool v0.23</title>
   <meta name="description" content="Test page: upload a photo, send it to SAM 3.1 with object prompts, get bounding boxes back with GPS.">
-  <meta name="theme-color" content="#142b4a">
+  <meta name="theme-color" content="#050816" id="themeColorMeta">
+  <script>
+  // Early theme: set html[data-theme] before CSS paints to avoid a flash.
+  // Blueprint dark is the default; a saved light choice is respected.
+  (function () {
+    try {
+      var t = localStorage.getItem("mg.theme");
+      if (t !== "light" && t !== "dark") t = "dark";
+      document.documentElement.dataset.theme = t;
+    } catch (e) { document.documentElement.dataset.theme = "dark"; }
+  })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon.svg">
@@ -21,10 +35,21 @@
   </script>
 </head>
 <body>
-  <header>
-    <h1>MicroGeo Capture Tool <span class="ver">v0.15</span></h1>
-    <p class="tagline">Collect delivery-point microgeography: photo → depth → map pin.</p>
-    <p id="secureNote"></p>
+  <header class="appbar">
+    <div class="appbar-row">
+      <div>
+        <h1>MicroGeo Capture Tool <span class="ver">v0.23</span></h1>
+        <p class="tagline">Collect delivery-point microgeography: photo → depth → map pin.</p>
+      </div>
+      <div class="appbar-actions">
+        <p class="secure-pill" id="secureNote"></p>
+        <button type="button" id="themeBtn" class="theme-btn" aria-label="Toggle light and dark mode">
+          <svg class="sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"/></svg>
+          <svg class="moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M13.5 9.5A5.7 5.7 0 0 1 6.5 2.5a5.7 5.7 0 1 0 7 7Z"/></svg>
+          <span id="themeLabel">Dark</span>
+        </button>
+      </div>
+    </div>
   </header>
 
   <main>
@@ -33,6 +58,7 @@
       <label class="row"><input type="radio" name="mode" value="single" checked> <span><b>Single photo</b> — detect objects, monocular depth, map pin.</span></label>
       <label class="row"><input type="radio" name="mode" value="set-depth"> <span><b>Photo set → pins</b> — zip in, depth + merged map pins per photo.</span></label>
       <label class="row"><input type="radio" name="mode" value="set-3d"> <span><b>Photo set → 3D</b> — zip in, COLMAP cloud with labels. No depth pass.</span></label>
+      <label class="row"><input type="radio" name="mode" value="set-video"> <span><b>Photo + video → DA3 cloud</b> — photo (EXIF) + video zip; Depth Anything 3 cloud, tagged features, map pins. Needs GPU install.</span></label>
       <p class="hint" id="modeOut">Single-photo route: only sections below marked for it are used.</p>
     </section>
 
@@ -41,7 +67,8 @@
       <input type="file" id="fileInput" accept="image/*" capture="environment">
       <p class="hint">On a phone this opens the camera. GPS is read at send time so the photo location can be mapped later.</p>
       <p id="exifOut">No photo yet.</p>
-      <canvas id="photoCanvas"></canvas>
+      <button type="button" id="locBtn">Location &amp; heading…</button>
+      <p class="hint" id="locState">Location: photo EXIF when present, else live fix.</p>
     </section>
 
     <section class="card" id="secObjects" data-title="Objects to find">
@@ -49,70 +76,65 @@
       <label>Prompts (comma separated)
         <input type="text" id="promptsInput" value="door, steps" autocomplete="off">
       </label>
-    </section>
-
-    <section class="card" id="secLoc" data-title="Location &amp; heading">
-      <h2>3. Location &amp; heading</h2>
-      <button type="button" id="gpsBtn">Get GPS location</button>
-      <p id="gpsOut">No location yet.</p>
-      <label>Correct latitude (overrides photo EXIF and the button fix)
-        <input type="number" id="manualLat" min="-90" max="90" step="0.000001" placeholder="e.g. 51.50740">
-      </label>
-      <label>Correct longitude
-        <input type="number" id="manualLon" min="-180" max="180" step="0.000001" placeholder="e.g. -0.12780">
-      </label>
-      <p class="hint">Or drag the Camera marker on the map — the boxes update here. Then Send or Re-project.</p>
-      <button type="button" id="headingBtn">Capture compass heading</button>
-      <p id="headingOut">No heading yet — point the phone at the subject first.</p>
-      <label>Heading, degrees (0 = north, overrides capture)
-        <input type="number" id="headingInput" min="0" max="360" step="0.1" placeholder="e.g. 123.4">
-      </label>
-      <label>Horizontal field of view, degrees
-        <input type="number" id="hfovInput" value="60" min="10" max="120" step="1">
-      </label>
-      <label>Max depth range, metres (monocular scale far end)
-        <input type="number" id="rangeInput" value="30" min="5" max="200" step="1">
-      </label>
-      <p class="hint">No GPS? The backend falls back to the photo's EXIF location when you upload a saved photo. Each box is projected to an approx map pin using heading + monocular depth; door/window pins snap to the OpenStreetMap building outline.</p>
-    </section>
-
-    <section class="card" id="secDetector" data-title="SAM detector">
-      <h2>4. SAM detector</h2>
-      <label class="row"><input type="radio" name="samBackend" value="api" checked> API SAM 3.1 (needs internet + token below)</label>
-      <label class="row"><input type="radio" name="samBackend" value="browser"> Browser SAM3-INT8 (~930 MB once, then fully offline; WebGPU recommended)</label>
-      <label class="row"><input type="radio" name="samBackend" value="clip"> Local CLIP windows (~350 MB once, then offline; coarse boxes, no token needed)</label>
-      <label class="row"><input type="radio" name="samBackend" value="mobilenet"> Browser MobileNet objects (a few MB once, then offline; ~80 known kinds like person/car/chair — prompts ignored)</label>
-      <p class="hint">Browser, CLIP and MobileNet modes still use the local backend for depth + map pins (localhost works offline).</p>
-      <label>Endpoint (API mode)
-        <input type="text" id="endpointInput" autocomplete="off" spellcheck="false">
-      </label>
-      <label>Model
-        <input type="text" id="modelInput" autocomplete="off" spellcheck="false">
-      </label>
-      <label>Token (kept in this browser only, never committed)
-        <input type="password" id="tokenInput" autocomplete="off">
-      </label>
+      <p class="hint">Add <code>|line</code> to draw a feature as a map line (e.g. <code>steps |line</code>); everything else is a point pin.</p>
       <button type="button" id="sendBtn" class="primary">Send to SAM</button>
       <p id="statusOut" role="status"></p>
+    </section>
+
+    <section class="card" id="secDetector" data-title="Detector">
+      <h2>3. Detector</h2>
+      <p class="hint" id="detectorSummary">API SAM 3.1</p>
+      <button type="button" id="cfgBtn">Config…</button>
     </section>
 
     <section class="card" id="secResults" data-title="Results">
       <h2>5. Results</h2>
       <ul id="boxList"><li class="hint">No results yet.</li></ul>
-      <h3>Depth (blue far, red near) + SAM boxes</h3>
-      <canvas id="depthCanvas" hidden></canvas>
-      <p class="hint" id="depthNote">No depth map yet — it arrives with the next Send.</p>
-      <h3>Map (camera + pins)</h3>
-      <div id="map"></div>
-      <p class="hint" id="mapNote">No pins yet — they arrive with the next Send.</p>
       <details>
         <summary>Raw JSON</summary>
         <pre id="rawOut">{}</pre>
       </details>
-      <button type="button" id="exportBtn" disabled>Download GeoJSON</button>
-      <button type="button" id="pngBtn" disabled>Download annotated image</button>
+      <div class="export-wrap">
+        <button type="button" id="exportBtn" disabled>Export ▾</button>
+        <div class="export-menu" id="exportMenu" hidden>
+          <button type="button" id="exportGeoBtn">GeoJSON map pins</button>
+          <button type="button" id="exportPngBtn">Annotated PNG</button>
+        </div>
+      </div>
       <button type="button" id="reprojectBtn" disabled>Re-project (no SAM)</button>
       <p class="hint">Re-project reuses the last SAM boxes with the current heading / field-of-view / range — no new SAM call, so you can iterate the geometry fast.</p>
+    </section>
+
+    <section class="card" id="secMatch" data-title="Map match">
+      <h2>5. Map match</h2>
+      <label>OSM area GeoJSON
+        <input type="file" id="osmFile" accept=".geojson,.json,application/geo+json,application/json">
+      </label>
+      <p class="hint" id="matchOut">Upload an OSM export to mark known points of interest on the map.</p>
+      <label>Match tolerance, metres
+        <input type="number" id="matchTol" value="15" min="1" max="200" step="1">
+      </label>
+      <label class="row"><input type="checkbox" id="snapPath"> Snap to path (nearest OSM path/road, within tolerance)</label>
+      <ul id="matchList"><li class="hint">No matches yet.</li></ul>
+    </section>
+
+    <section class="card" id="secStage" data-title="View">
+      <div class="console-left">
+        <figure class="console-pane">
+          <figcaption>Photo</figcaption>
+          <canvas id="photoCanvas"></canvas>
+        </figure>
+        <figure class="console-pane">
+          <figcaption>Depth <span class="hint" id="depthNote">No depth map yet — it arrives with the next Send.</span></figcaption>
+          <canvas id="depthCanvas" hidden></canvas>
+        </figure>
+      </div>
+      <div class="console-right">
+        <figure class="console-pane">
+          <figcaption>Map <button type="button" id="measureBtn" class="mini-btn" aria-pressed="false" title="Measure distances in metres">Measure</button> <span class="hint" id="mapNote">No pins yet — they arrive with the next Send.</span></figcaption>
+          <div id="map"></div>
+        </figure>
+      </div>
     </section>
 
     <section class="card" id="secSet" data-title="Photo set">
@@ -170,7 +192,6 @@
       <p id="sfmOut" role="status"></p>
       <progress id="sfmProg" max="100" value="0" hidden></progress>
       <pre id="sfmLog" class="sfm-log" hidden></pre>
-      <div id="sfmStats" class="sfm-stats" hidden></div>
       <ul id="sfmWarn" class="warn-list" hidden></ul>
       <div id="sfmCleanWrap" hidden>
         <h3>COLMAP input photos — unlabelled</h3>
@@ -188,15 +209,25 @@
       </div>
       <div id="sfmWrap" class="sfm-wrap">
         <div id="sfmToolbar" class="sfm-toolbar" role="toolbar" aria-label="3D tools">
-          <button type="button" id="toolReset" class="tool primary" title="Fit the whole cloud using the SLAM-image-1 viewer (F)">Fit view</button>
-          <button type="button" id="toolTop" class="tool">Top</button>
-          <button type="button" id="toolResetRoll" class="tool">Reset roll</button>
-          <button type="button" id="toolExpand" class="tool" aria-pressed="false">Expand viewer</button>
-          <button type="button" id="toolZoomIn" class="tool" aria-label="Zoom in">Zoom +</button>
-          <button type="button" id="toolZoomOut" class="tool" aria-label="Zoom out">Zoom −</button>
-          <button type="button" id="toolOrbit" class="tool active" aria-pressed="true">Orbit</button>
-          <button type="button" id="toolIdentify" class="tool" aria-pressed="false">Identify</button>
-          <button type="button" id="toolExport" class="tool">Export</button>
+          <button type="button" id="toolReset" class="tool primary" title="Fit the whole cloud (F)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/></svg><span class="vh">Fit view</span></button>
+          <button type="button" id="toolTop" class="tool" title="Top view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg><span class="vh">Top</span></button>
+          <button type="button" id="toolResetRoll" class="tool" title="Reset roll (R)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 2.6-6.3"/><path d="M3 4v5h5"/></svg><span class="vh">Reset roll</span></button>
+          <button type="button" id="toolExpand" class="tool" aria-pressed="false" aria-label="Expand viewer" title="Expand viewer (Esc restores)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4H4v5"/><path d="M15 4h5v5"/><path d="M9 20H4v-5"/><path d="M15 20h5v-5"/></svg><span class="vh">Expand viewer</span></button>
+          <button type="button" id="toolZoomIn" class="tool" aria-label="Zoom in" title="Zoom in (+)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M11 8v6"/><path d="M8 11h6"/><path d="M16.5 16.5 21 21"/></svg><span class="vh">Zoom in</span></button>
+          <button type="button" id="toolZoomOut" class="tool" aria-label="Zoom out" title="Zoom out (−)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M8 11h6"/><path d="M16.5 16.5 21 21"/></svg><span class="vh">Zoom out</span></button>
+          <button type="button" id="toolOrbit" class="tool active" aria-pressed="true" title="Orbit tool"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 4v5h-5"/></svg><span class="vh">Orbit</span></button>
+          <button type="button" id="toolIdentify" class="tool" aria-pressed="false" title="Identify tool (click a point)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="7"/><path d="M12 2v4"/><path d="M12 18v4"/><path d="M2 12h4"/><path d="M18 12h4"/></svg><span class="vh">Identify</span></button>
+          <button type="button" id="toolExport" class="tool" title="Export cloud"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/></svg><span class="vh">Export</span></button>
+        </div>
+        <div class="sfm-stage">
+        <div id="sfmViewWrap" class="sfm-view-wrap">
+          <div id="sfmView" class="sfm-view"></div>
+          <p class="hint sfm-empty" id="sfmEmpty">No 3D data yet — reconstruct a zip first.</p>
+          <div class="sfm-popup" id="sfmPopup" hidden></div>
+        </div>
+        <aside class="sfm-side" aria-label="3D view panels">
+        <div class="hud-panel hud-left">
+          <h3 class="hud-title">Display</h3>
           <label class="tool-slider">Colours
             <select id="toolColorMode">
               <option value="photo" selected>RGB</option>
@@ -208,19 +239,16 @@
             <input type="range" id="sfmPointSize" min="0.25" max="4" step="0.25" value="1" aria-label="Point size">
           </label>
         </div>
-        <div class="reconstruction-layout">
-        <div id="sfmViewWrap" class="sfm-view-wrap">
-          <div id="sfmView" class="sfm-view sfm-single"></div>
-        </div>
-        <aside class="survey-map">
-          <h3>Photo locations</h3>
-          <p class="hint" id="sfmMapNote">Photo GPS will appear here after reconstruction.</p>
+        <div class="hud-panel hud-right">
+          <h3 class="hud-title">Minimap</h3>
           <div id="sfmMap" aria-label="Map of photo EXIF GPS locations"></div>
+          <p class="hint" id="sfmMapNote">Photo GPS will appear here after reconstruction.</p>
+          <h3 class="hud-title">Telemetry</h3>
+          <div id="sfmStats" class="sfm-stats" hidden></div>
           <p class="hint">Markers show the original photo GPS. The cloud uses a local coordinate frame; its scale and north alignment are not calibrated to this map.</p>
+        </div>
         </aside>
         </div>
-        <p class="hint sfm-empty" id="sfmEmpty">No 3D data yet — reconstruct a zip first.</p>
-        <div class="sfm-popup" id="sfmPopup" hidden></div>
         <div id="sfmExportDlg" class="sfm-dlg" hidden>
           <h4>Export cloud</h4>
           <p class="hint" id="sfmExportInfo"></p>
@@ -246,7 +274,107 @@
       </div>
       <p class="hint">SLAM-image-1 viewer: drag to orbit, right-drag to pan, wheel to zoom. Fit view (F) restores the whole scene; Top and Reset roll use the other app's controls. Drag the edges for zoom, pan or roll; hold Shift for fine adjustment. Expand viewer gives more space (Escape restores it).</p>
     </section>
+    <section class="card" id="secVideo" data-title="Photo + video → DA3 cloud">
+      <h2>Photo + video → DA3 cloud</h2>
+      <p class="hint">Zip with ONE photo (EXIF GPS + heading locates the start) and one short video. Depth Anything 3 builds a metric point cloud from the video; concept boxes tag its points; features land on the map from the photo fix + heading. Assumes the video starts where the photo was taken, looking the same way. Real inference needs the depth-anything-3 install on a GPU host — failures say so, never a bare 500.</p>
+      <label>Zip (1 photo + 1 video)
+        <input type="file" id="videoZip" accept=".zip">
+      </label>
+      <label>Concepts to tag (comma separated, <code>|line</code> for lines)
+        <input type="text" id="videoConcepts" value="door, steps |line" autocomplete="off">
+      </label>
+      <label>Detector
+        <select id="videoDetector">
+          <option value="sam">Server SAM 3</option>
+          <option value="clip">Local CLIP</option>
+          <option value="api">Meta API (SAM 3.1 per frame)</option>
+        </select>
+      </label>
+      <label id="videoTokenRow" hidden>Meta API token (kept in this browser only)
+        <input type="password" id="videoToken" autocomplete="off">
+      </label>
+      <label class="row"><input type="checkbox" id="videoSnap"> Snap door/window features to building outlines</label>
+      <button type="button" id="videoBtn" class="primary">Build cloud + map features</button>
+      <p id="videoOut">No run yet.</p>
+      <progress id="videoProg" hidden></progress>
+      <pre id="videoLog" class="sfm-log" hidden></pre>
+      <h3>Point cloud</h3>
+      <div class="viewer-frame video-viewer">
+        <div id="videoView"></div>
+        <div id="videoPopup" hidden></div>
+        <p class="viewer-empty" id="videoEmpty">The DA3 point cloud will appear here.</p>
+      </div>
+      <h3>Map features</h3>
+      <ul id="videoFeatures"><li class="hint">No features yet — run with concepts to tag the cloud.</li></ul>
+      <button type="button" id="videoExportBtn" disabled>Export features (GeoJSON)</button>
+      <div id="videoMap"></div>
+      <p class="hint" id="videoMapNote">Feature pins appear here after a run.</p>
+    </section>
   </main>
+
+  <dialog id="cfgDlg" class="mg-dlg" aria-labelledby="cfgTitle">
+    <div class="dlg-head">
+      <h2 id="cfgTitle">Setup</h2>
+      <button type="button" id="cfgClose" aria-label="Close setup">✕</button>
+    </div>
+    <p class="hint">Set once — kept in this browser.</p>
+    <h3>Detector</h3>
+    <label class="row"><input type="radio" name="samBackend" value="api" checked> API SAM 3.1 (needs internet + token below)</label>
+    <label class="row"><input type="radio" name="samBackend" value="browser"> Browser SAM3-INT8 (~930 MB once, then fully offline; WebGPU recommended)</label>
+    <label class="row"><input type="radio" name="samBackend" value="clip"> Local CLIP windows (~350 MB once, then offline; coarse boxes, no token needed)</label>
+    <label class="row"><input type="radio" name="samBackend" value="mobilenet"> Browser MobileNet objects (a few MB once, then offline; ~80 known kinds like person/car/chair — prompts ignored)</label>
+    <p class="hint">Browser, CLIP and MobileNet modes still use the local backend for depth + map pins (localhost works offline).</p>
+    <label>Endpoint (API mode)
+      <input type="text" id="endpointInput" autocomplete="off" spellcheck="false">
+    </label>
+    <label>Model
+      <input type="text" id="modelInput" autocomplete="off" spellcheck="false">
+    </label>
+    <label>Token (kept in this browser only, never committed)
+      <input type="password" id="tokenInput" autocomplete="off">
+    </label>
+    <h3>Geometry &amp; depth</h3>
+    <label>Horizontal field of view, degrees
+      <input type="number" id="hfovInput" value="60" min="10" max="120" step="1">
+    </label>
+    <label>Max depth range, metres (monocular scale far end)
+      <input type="number" id="rangeInput" value="30" min="5" max="200" step="1">
+    </label>
+    <label>Depth backend (monocular range)
+      <select id="depthBackend">
+        <option value="" selected>Auto — Depth Anything unless a YOLO model is named</option>
+        <option value="da">Depth Anything (relative, mapped via max range)</option>
+        <option value="yolo">YOLO26-depth (metric metres, needs ultralytics server-side)</option>
+      </select>
+    </label>
+    <label>Depth model override (optional)
+      <input type="text" id="depthModel" autocomplete="off" spellcheck="false" placeholder="e.g. yolo26n-depth.pt">
+    </label>
+  </dialog>
+
+  <dialog id="locDlg" class="mg-dlg" aria-labelledby="locTitle">
+    <div class="dlg-head">
+      <h2 id="locTitle">Location &amp; heading</h2>
+      <button type="button" id="locClose" aria-label="Close location">✕</button>
+    </div>
+    <p class="hint">Only needed when the photo has no EXIF location — otherwise the photo's own tags win. Each box is projected to an approx map pin using heading + monocular depth.</p>
+    <button type="button" id="gpsBtn">Get GPS location</button>
+    <p id="gpsOut">No location yet.</p>
+    <label>Correct latitude (overrides photo EXIF and the button fix)
+      <input type="number" id="manualLat" min="-90" max="90" step="0.000001" placeholder="e.g. 51.50740">
+    </label>
+    <label>Correct longitude
+      <input type="number" id="manualLon" min="-180" max="180" step="0.000001" placeholder="e.g. -0.12780">
+    </label>
+    <p class="hint">Or drag the Camera marker on the map — the boxes update here. Then Send or Re-project.</p>
+    <button type="button" id="headingBtn">Capture compass heading</button>
+    <p id="headingOut">No heading yet — point the phone at the subject first.</p>
+    <label>Heading, degrees (0 = north, overrides capture)
+      <input type="number" id="headingInput" min="0" max="360" step="0.1" placeholder="e.g. 123.4">
+    </label>
+  </dialog>
+
+  <div id="hoverTip" hidden></div>
 
   <script src="config.js"></script>
   <script src="exif.js"></script>

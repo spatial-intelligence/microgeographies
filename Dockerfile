@@ -79,6 +79,15 @@ COPY backend/requirements.txt ./backend/requirements.txt
 RUN python3.11 -m venv /opt/venv \
  && pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r backend/requirements.txt
+# Bake the YOLO26-depth weights into the image (~12 MB) so the metric
+# depth backend works on first request with no runtime download.
+RUN /opt/venv/bin/python -c "from ultralytics import YOLO; YOLO('yolo26n-depth.pt')"
+# Depth Anything 3 for /api/video-cloud (photo+video workflow). Weights
+# (~7 GB) are NOT baked: they land in the /hf-cache volume on first use
+# and persist there. This install downgrades numpy to <2 (DA3 pin);
+# the app stack is verified against it.
+RUN pip install --no-cache-dir \
+    git+https://github.com/ByteDance-Seed/depth-anything-3.git addict
 
 # The app itself (repo root is served as the page by backend/server.py).
 COPY . .

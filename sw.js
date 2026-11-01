@@ -1,4 +1,4 @@
-const CACHE = "microgeo-v31"; // bump whenever the shell changes, or updates never reach installed users
+const CACHE = "microgeo-v39"; // bump whenever the shell changes, or updates never reach installed users
 const SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./sfm3d.js", "./slam-viewer.js", "./view-navigation.js", "./view-roll.js", "./point-identify.js", "./viewer-annotations.js", "./viewer-navigation.css", "./vendor/three.module.js", "./vendor/three.core.js", "./vendor/OrbitControls.js", "./exif.js", "./sam3local.js", "./mobilenet.js", "./config.js", "./manifest.webmanifest", "./icon.svg"];
 // Pinned separately: the ONNX Runtime Web files (small) live here after
 // first use; the 700 MB SAM weights live in "microgeo-sam3", written by
@@ -11,6 +11,7 @@ const ORT_CDN = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
 const TF_CDN = "https://cdn.jsdelivr.net/npm/@tensorflow/";
 const TFHUB = ["https://storage.googleapis.com/tfjs-models/", "https://tfhub.dev/"];
 const THREE_CDN = "https://cdn.jsdelivr.net/npm/three@0.186.1/";
+const FONT_CDN = ["https://fonts.googleapis.com/", "https://fonts.gstatic.com/"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -39,6 +40,7 @@ self.addEventListener("fetch", (e) => {
   if (e.request.url.startsWith(TF_CDN)) { cacheFirst(e, VENDOR_CACHE); return; }
   if (TFHUB.some((h) => e.request.url.startsWith(h))) { cacheFirst(e, VENDOR_CACHE); return; }
   if (e.request.url.startsWith(THREE_CDN)) { cacheFirst(e, VENDOR_CACHE); return; }
+  if (FONT_CDN.some((h) => e.request.url.startsWith(h))) { cacheFirst(e, VENDOR_CACHE); return; }
   if (!e.request.url.startsWith(self.location.origin)) return;
   cacheFirst(e, CACHE);
 });

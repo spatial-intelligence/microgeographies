@@ -11,10 +11,12 @@
 # http://127.0.0.1:8000/api/detect to use the local detector instead.
 #
 # MOCK_SAM=1 skips the SAM 3 weight download (deterministic demo boxes).
-# Drop it for real SAM 3 (needs torch + GPU for speed). Depth is always
-# the real Depth Anything Small model (~95 MB first download); override
+# Drop it for real SAM 3 (needs torch + GPU for speed). Depth defaults to
+# the real Depth Anything V1 Small model (~95 MB first download); override
 # with DEPTH_MODEL_ID=<hf-id> (needs a transformers-native checkpoint —
-# Depth Anything V3 has no PyTorch release yet, only ONNX/mobile ports).
+# Depth Anything V3 has no PyTorch release yet, only ONNX/mobile ports),
+# or switch to metric YOLO26-depth with DEPTH_BACKEND=yolo (bundled
+# via backend/requirements.txt; weights ~12 MB auto-download).
 set -u
 cd "$(dirname "$0")"
 

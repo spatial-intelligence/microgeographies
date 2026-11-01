@@ -9,3 +9,21 @@ transformers
 # binary on PATH (https://colmap.github.io) OR `pip install pycolmap`.
 # Without either, /api/sfm returns HTTP 503; everything else is unaffected.
 # pycolmap  # uncomment to enable the /api/sfm fallback without the CLI
+# Depth Anything 3 (/api/video-cloud) is NOT installed from this file:
+# it is GitHub-only and heavy, so the Dockerfile installs it (with the
+# `addict` dep it forgets to declare) on GPU images; elsewhere:
+#   pip install git+https://github.com/ByteDance-Seed/depth-anything-3.git addict
+# Weights (~6.8 GB) download once into the HF cache. Without it,
+# /api/video-cloud explains the install in its result payload;
+# everything else is unaffected (MOCK_DA3=1 fakes the pass offline).
+# YOLO26-depth backend (metric monocular depth as an alt to Depth
+# Anything). Select per request with depth_backend=yolo (or
+# model=yolo26n-depth.pt), or server-wide with DEPTH_BACKEND=yolo.
+ultralytics>=8.4.104
+# Headless OpenCV replaces ultralytics' GUI build (same cv2 API for
+# inference, no libGL needed) so headless servers and Docker work.
+opencv-python-headless
+# NOTE: on a CPU-only torch (2.x.x+cpu) venv, pip pulls a CUDA torchvision
+# that fails to import; if so, align it with:
+#   pip install --index-url https://download.pytorch.org/whl/cpu \
+#     "torchvision==<same-version>+cpu"

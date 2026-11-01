@@ -35,15 +35,34 @@ SNAP_LABELS = {"door", "doors", "doorway", "entrance", "gate", "window", "window
 EARTH_R_M = 6371000.0
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
-# No transformers-native Depth Anything V3 checkpoint exists yet (the V3
-# weights on HF are ONNX/mobile ports), so V2-Small stays the default.
-# Point DEPTH_MODEL_ID at another AutoModelForDepthEstimation id — e.g.
-# depth-anything/Depth-Anything-V2-Base-hf — to swap without code changes.
+# Default depth backend is Depth Anything **V1** Small
+# (LiheYoung/depth-anything-small-hf, ~100 MB). V2-Small would be
+# depth-anything/Depth-Anything-V2-Small-hf; no transformers-native
+# Depth Anything V3 checkpoint exists yet (the V3 weights on HF are
+# ONNX/mobile ports). Point DEPTH_MODEL_ID at another
+# AutoModelForDepthEstimation id to swap without code changes.
 DEFAULT_DEPTH_MODEL = os.environ.get(
     "DEPTH_MODEL_ID", "LiheYoung/depth-anything-small-hf")
 
+# Alternative backend: Ultralytics YOLO26 monocular depth
+# (https://docs.ultralytics.com/tasks/depth). Unlike Depth Anything's
+# relative depth, YOLO26-depth predicts METRIC depth (metres per pixel,
+# unbounded log head, ~0.02–150 m), so ranges come straight from the
+# model instead of the relative_to_metric heuristic. Shipped via
+# backend/requirements.txt (Docker bakes the weights in); when the
+# import is missing, depth degrades to an error string, never a 500.
+# Select with DEPTH_BACKEND=yolo (or per-request `depth_backend`), or
+# pass a yolo26*-depth weight (e.g. model="yolo26n-depth.pt") which
+# auto-selects this backend.
+DEFAULT_DEPTH_BACKEND = os.environ.get("DEPTH_BACKEND", "auto")
+DEFAULT_YOLO_DEPTH_MODEL = os.environ.get(
+    "YOLO_DEPTH_MODEL_ID", "yolo26n-depth.pt")
+YOLO_DEPTH_IMGSZ = int(os.environ.get("YOLO_DEPTH_IMGSZ", "768"))
+
 _depth_model = None  # lazy (processor, model, device)
 _depth_model_id = None
+_yolo_model = None  # lazy ultralytics.YOLO instance
+_yolo_model_id = None
 
 
 # --------------------------------------------------------------------------
@@ -367,6 +386,79 @@ def mock_depth_grid(grid_w=80, grid_h=60):
             for r in range(grid_h)]
 
 
+def is_yolo_model_id(model_id):
+    """True when a depth model id names YOLO26-depth weights.
+
+    Matches ``yolo26*-depth`` weight files (``.pt``/``.onnx``/``.engine``)
+    and bare ids containing both "yolo" and "depth".
+    """
+    low = str(model_id or "").strip().lower()
+    if not low:
+        return False
+    if low.endswith((".pt", ".onnx", ".engine", ".trt")) and "depth" in low:
+        return True
+    return "yolo" in low and "depth" in low
+
+
+def resolve_depth_backend(model_id=None, backend=None):
+    """Pick the depth backend: ``"yolo"`` or ``"da"`` (Depth Anything).
+
+    Explicit ``backend`` (or ``DEPTH_BACKEND`` env) wins: ``yolo`` /
+    ``da`` (+ aliases). Otherwise ``"auto"`` routes YOLO weight names
+    (see is_yolo_model_id) to YOLO and everything else to Depth Anything.
+    """
+    b = str(backend if backend not in (None, "")
+            else os.environ.get("DEPTH_BACKEND", "auto")).strip().lower()
+    if b in ("yolo", "yolo26", "yolov26", "ultralytics"):
+        return "yolo"
+    if b in ("da", "depth-anything", "depth_anything", "depthanything",
+             "transformers", "v1", "v2"):
+        return "da"
+    return "yolo" if is_yolo_model_id(model_id) else "da"
+
+
+def metric_to_relative(metric_grid):
+    """Metric metres grid -> relative grid (0 = far, 1 = near).
+
+    Inverted linear normalization so YOLO metric maps visualize with the
+    same blue-far/red-near colormap as Depth Anything. Flat or empty
+    grids map to 0.5; invalid cells (<= 0, NaN, inf) are treated as far.
+    """
+    rows = len(metric_grid or [])
+    cols = len(metric_grid[0]) if rows else 0
+    if not rows or not cols:
+        return []
+    vals = [float(v) for row in metric_grid for v in row
+            if v is not None and math.isfinite(float(v)) and float(v) > 0]
+    if not vals:
+        return [[0.5] * cols for _ in range(rows)]
+    lo, hi = min(vals), max(vals)
+    span = hi - lo
+    out = []
+    for row in metric_grid:
+        orow = []
+        for v in row:
+            try:
+                m = float(v)
+            except (TypeError, ValueError):
+                m = hi
+            if not math.isfinite(m) or m <= 0:
+                m = hi  # invalid reads as far
+            rel = 1.0 - (m - lo) / span if span > 0 else 0.5
+            orow.append(round(min(1.0, max(0.0, rel)), 4))
+        out.append(orow)
+    return out
+
+
+def mock_metric_grid(grid_w=80, grid_h=60, max_range_m=30.0, min_range_m=0.5):
+    """Deterministic metric gradient mirroring mock_depth_grid (tests)."""
+    return [[round(relative_to_metric(r / max(1, grid_h - 1),
+                                     max_range_m=max_range_m,
+                                     min_range_m=min_range_m), 3)
+             for _c in range(grid_w)]
+            for r in range(grid_h)]
+
+
 def _load_depth_model(model_id=None):
     global _depth_model, _depth_model_id
     model_id = model_id or DEFAULT_DEPTH_MODEL
@@ -383,23 +475,94 @@ def _load_depth_model(model_id=None):
     return _depth_model
 
 
-def estimate_depth_grid(pil_image, grid_w=None, grid_h=None, model_id=None):
+def _load_yolo_model(model_id=None):
+    global _yolo_model, _yolo_model_id
+    model_id = model_id or DEFAULT_YOLO_DEPTH_MODEL
+    if _yolo_model is not None and _yolo_model_id == model_id:
+        return _yolo_model
+    try:
+        from ultralytics import YOLO
+    except ImportError as e:
+        raise RuntimeError(
+            "YOLO depth backend needs `pip install \"ultralytics>=8.4.104\"` "
+            f"(tried model {model_id!r})") from e
+    _yolo_model = YOLO(model_id)  # downloads weights on first use
+    _yolo_model_id = model_id
+    return _yolo_model
+
+
+def _estimate_yolo_grid(pil_image, grid_w, grid_h, model_id=None):
+    """Metric depth via YOLO26-depth, downsampled to the grid.
+
+    Returns ``grid`` (relative 0..1 for visualization/compat) plus
+    ``metric_grid`` (median metres per cell) so ranges come from the
+    model, not the relative_to_metric heuristic. Invalid pixels (<= 0,
+    NaN, inf) are excluded from block means; fully invalid blocks fall
+    back to the global valid median.
+    """
+    import torch
+    mid = model_id or DEFAULT_YOLO_DEPTH_MODEL
+    model = _load_yolo_model(mid)
+    rgb = pil_image.convert("RGB")
+    with torch.no_grad():
+        res = model.predict(rgb, imgsz=YOLO_DEPTH_IMGSZ, verbose=False)[0]
+    depth = res.depth.data  # torch (H, W), metres, aligned to input
+    if depth is None:
+        raise RuntimeError(f"YOLO depth model {mid!r} returned no depth map")
+    depth = depth.float()
+    valid = torch.isfinite(depth) & (depth > 0)
+    fallback = float(depth[valid].median().item()) if valid.any() else 0.0
+    H, W = depth.shape[-2], depth.shape[-1]
+    metric = []
+    for r in range(grid_h):
+        row = []
+        for c in range(grid_w):
+            r0, r1 = r * H // grid_h, max(r * H // grid_h + 1, (r + 1) * H // grid_h)
+            c0, c1 = c * W // grid_w, max(c * W // grid_w + 1, (c + 1) * W // grid_w)
+            block = depth[r0:r1, c0:c1]
+            ok = block[torch.isfinite(block) & (block > 0)]
+            row.append(round(float(ok.mean().item()) if ok.numel()
+                             else fallback, 3))
+        metric.append(row)
+    return {"grid": metric_to_relative(metric), "metric_grid": metric,
+            "mock": False, "backend": "yolo", "model": mid}
+
+
+def estimate_depth_grid(pil_image, grid_w=None, grid_h=None, model_id=None,
+                        backend=None):
     """Relative depth as a grid_h x grid_w nested list, 0 = far, 1 = near.
 
     Grid dims default to the photo aspect via depth_grid_dims (80 cells
     on the long edge) so portrait photos get portrait grids. Uses
     ``MOCK_DEPTH=1`` gradient when set (tests, offline dev), otherwise
-    the depth model via transformers (downloads weights on first use).
+    the depth model (downloads weights on first use).
     The full-resolution prediction is min-max normalized then
     downsampled to the grid by block averaging.
+
+    ``backend`` selects ``"da"`` (Depth Anything, relative) or
+    ``"yolo"`` (YOLO26-depth, metric); ``"auto"`` (default) routes
+    ``yolo26*-depth`` weight names to YOLO. The result always carries
+    ``grid``/``mock``/``backend``/``model``; YOLO results also carry
+    ``metric_grid`` (metres per cell).
     """
     if grid_w is None or grid_h is None:
         grid_w, grid_h = depth_grid_dims(pil_image)
+    use = resolve_depth_backend(model_id, backend)
     if os.getenv("MOCK_DEPTH") == "1":
-        return {"grid": mock_depth_grid(grid_w, grid_h), "mock": True}
+        out = {"grid": mock_depth_grid(grid_w, grid_h), "mock": True,
+               "backend": use,
+               "model": (model_id or (DEFAULT_YOLO_DEPTH_MODEL
+                                      if use == "yolo"
+                                      else DEFAULT_DEPTH_MODEL))}
+        if use == "yolo":
+            out["metric_grid"] = mock_metric_grid(grid_w, grid_h)
+        return out
+    if use == "yolo":
+        return _estimate_yolo_grid(pil_image, grid_w, grid_h, model_id)
     import torch
+    mid = model_id or DEFAULT_DEPTH_MODEL
     rgb = pil_image.convert("RGB")
-    processor, model, device = _load_depth_model(model_id)
+    processor, model, device = _load_depth_model(mid)
     inputs = processor(images=rgb, return_tensors="pt").to(device)
     with torch.no_grad():
         pred = model(**inputs).predicted_depth[0]
@@ -416,7 +579,7 @@ def estimate_depth_grid(pil_image, grid_w=None, grid_h=None, model_id=None):
             block = norm[r0:r1, c0:c1]
             row.append(round(float(block.mean().item()), 4))
         grid.append(row)
-    return {"grid": grid, "mock": False}
+    return {"grid": grid, "mock": False, "backend": "da", "model": mid}
 
 
 # --------------------------------------------------------------------------

@@ -8,16 +8,27 @@
     headingBtn = $("headingBtn"), headingOut = $("headingOut"),
     headingInput = $("headingInput"), hfovInput = $("hfovInput"),
     rangeInput = $("rangeInput"),
+    depthBackend = $("depthBackend"), depthModel = $("depthModel"),
     endpointInput = $("endpointInput"), modelInput = $("modelInput"),
     tokenInput = $("tokenInput"),
     sendBtn = $("sendBtn"), statusOut = $("statusOut"),
     canvas = $("photoCanvas"), boxList = $("boxList"),
     depthNote = $("depthNote"),
     mapNote = $("mapNote"),
-    rawOut = $("rawOut"), exportBtn = $("exportBtn"), pngBtn = $("pngBtn"),
-    reprojectBtn = $("reprojectBtn");
+    rawOut = $("rawOut"), exportBtn = $("exportBtn"),
+    exportMenu = $("exportMenu"), exportGeoBtn = $("exportGeoBtn"),
+    exportPngBtn = $("exportPngBtn"),
+    reprojectBtn = $("reprojectBtn"),
+    locBtn = $("locBtn"), locState = $("locState"),
+    locDlg = $("locDlg"), locClose = $("locClose"),
+    cfgBtn = $("cfgBtn"), cfgDlg = $("cfgDlg"), cfgClose = $("cfgClose"),
+    detectorSummary = $("detectorSummary"),
+    osmFile = $("osmFile"), matchTol = $("matchTol"), snapPath = $("snapPath"),
+    matchOut = $("matchOut"), matchList = $("matchList"),
+    measureBtn = $("measureBtn"), hoverTip = $("hoverTip");
 
   let map = null, mapLayers = null;
+  let manualClearedNote = ""; // one-shot: previous photo's manual override was just cleared
 
   let imgEl = null, fileBlob = null, boxes = [], gps = null, lastRaw = {};
   let origBoxes = []; // last SAM boxes in uploaded-original pixels, for re-projection
@@ -76,33 +87,40 @@
     return headingDeg;
   }
 
+  // One-shot EXIF verdict line: prefixes the "manual override was
+  // cleared" note once, on the final verdict, then consumes it.
+  function sayExif(msg) {
+    exifOut.textContent = manualClearedNote + msg;
+    manualClearedNote = "";
+  }
+
   // EXIF preview at load time: says what the photo carries and what the
   // backend will therefore use, before anything is sent.
   function previewExif(file) {
     exifOut.textContent = "Reading photo metadata…";
     if (/heic|heif/i.test(file.type) || /\.hei[cf]$/i.test(file.name || "")) {
-      exifOut.textContent = "HEIC photo — direction/location tags can't be read here. Convert to JPEG first, or use live GPS + manual heading.";
+      sayExif("HEIC photo — direction/location tags can't be read here. Convert to JPEG first, or use live GPS + manual heading.");
       return;
     }
     file.arrayBuffer().then((buf) => {
       const ex = window.MG_EXIF ? window.MG_EXIF.parseGPS(buf) : null;
       if (!ex || !ex.hasExif) {
-        exifOut.textContent = "No EXIF in this photo (screenshot, PNG, or stripped upload) — the live fix will be used. Press Get GPS location, and capture or type the heading.";
+        sayExif("No EXIF in this photo (screenshot, PNG, or stripped upload) — the live fix will be used. Press Get GPS location, and capture or type the heading.");
         return;
       }
       const bits = [];
       if (ex.lat != null && ex.lon != null) bits.push(`location ${ex.lat.toFixed(6)}, ${ex.lon.toFixed(6)}`);
       if (ex.heading != null) bits.push(`heading ${ex.heading}°`);
       if (!bits.length) {
-        exifOut.textContent = "Photo has EXIF but no GPS location — the live fix will be used. Press Get GPS location, and capture or type the heading.";
+        sayExif("Photo has EXIF but no GPS location — the live fix will be used. Press Get GPS location, and capture or type the heading.");
         return;
       }
       const used = [];
       if (ex.lat != null) used.push("location");
       if (ex.heading != null && currentHeading() == null) used.push("heading");
-      exifOut.textContent = `Photo EXIF holds ${bits.join(" + ")} — will be used (${used.join(" + ")}), not this computer's.`;
+      sayExif(`Photo EXIF holds ${bits.join(" + ")} — will be used (${used.join(" + ")}), not this computer's.`);
     }).catch(() => {
-      exifOut.textContent = "Could not read photo metadata — the live fix will be used.";
+      sayExif("Could not read photo metadata — the live fix will be used.");
     });
   }
 
@@ -110,6 +128,28 @@
   $("secureNote").textContent = window.isSecureContext
     ? "Secure context — GPS available."
     : "Not a secure context — GPS needs HTTPS (or localhost).";
+
+  // Light/dark theme. The inline script in <head> already set
+  // html[data-theme] before first paint (blueprint dark by default);
+  // here we sync the toggle label + theme-color meta and persist.
+  const themeBtn = $("themeBtn"), themeLabel = $("themeLabel"),
+    themeMeta = document.getElementById("themeColorMeta");
+  function paintTheme(t) {
+    document.documentElement.dataset.theme = t;
+    if (themeLabel) themeLabel.textContent = t === "dark" ? "Light" : "Dark";
+    if (themeMeta) themeMeta.setAttribute("content", t === "dark" ? "#050816" : "#10233c");
+  }
+  function currentTheme() {
+    return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  }
+  if (themeBtn) {
+    paintTheme(currentTheme());
+    themeBtn.addEventListener("click", () => {
+      const next = currentTheme() === "dark" ? "light" : "dark";
+      paintTheme(next);
+      try { localStorage.setItem("mg.theme", next); } catch (e) { /* private mode */ }
+    });
+  }
 
   // Restore non-secret prefs; token lives in localStorage of this browser only.
   endpointInput.value = localStorage.getItem("mg.endpoint") || cfg.samEndpoint || "/api/sam";
@@ -119,9 +159,101 @@
   endpointInput.addEventListener("change", () => localStorage.setItem("mg.endpoint", endpointInput.value));
   modelInput.addEventListener("change", () => localStorage.setItem("mg.model", modelInput.value));
   tokenInput.addEventListener("change", () => localStorage.setItem("mg.token", tokenInput.value));
+  // Setup is set-once: detector choice + geometry persist too.
+  try {
+    const savedBackend = localStorage.getItem("mg.samBackend");
+    if (savedBackend) {
+      document.querySelectorAll('input[name="samBackend"]').forEach((el) => {
+        el.checked = el.value === savedBackend;
+      });
+    }
+  } catch (e) { /* private mode */ }
+  if (localStorage.getItem("mg.hfov")) hfovInput.value = localStorage.getItem("mg.hfov");
+  if (localStorage.getItem("mg.range")) rangeInput.value = localStorage.getItem("mg.range");
+  hfovInput.addEventListener("change", () => localStorage.setItem("mg.hfov", hfovInput.value));
+  rangeInput.addEventListener("change", () => localStorage.setItem("mg.range", rangeInput.value));
+  document.querySelectorAll('input[name="samBackend"]').forEach((el) => {
+    el.addEventListener("change", () => {
+      try { localStorage.setItem("mg.samBackend", samBackend()); } catch (e) { /* private mode */ }
+      refreshDetectorSummary();
+    });
+  });
 
   const exifOut = $("exifOut");
   const manualLat = $("manualLat"), manualLon = $("manualLon");
+
+  // Depth backend override (monocular range). Auto = Depth Anything
+  // unless a YOLO weight is named; persisted like the SAM prefs.
+  if (depthBackend) {
+    depthBackend.value = localStorage.getItem("mg.depthBackend") || "";
+    depthBackend.addEventListener("change", () => localStorage.setItem("mg.depthBackend", depthBackend.value));
+  }
+  if (depthModel) {
+    depthModel.value = localStorage.getItem("mg.depthModel") || "";
+    depthModel.addEventListener("change", () => localStorage.setItem("mg.depthModel", depthModel.value));
+  }
+  function depthFields(fd) {
+    if (depthBackend && depthBackend.value) fd.append("depth_backend", depthBackend.value);
+    if (depthModel && depthModel.value.trim()) fd.append("model", depthModel.value.trim());
+  }
+
+  // Setup + location dialogs (native <dialog>, Esc closes natively).
+  function openDlg(d) {
+    if (d && typeof d.showModal === "function" && !d.open) d.showModal();
+  }
+  if (cfgBtn) cfgBtn.addEventListener("click", () => openDlg(cfgDlg));
+  if (locBtn) locBtn.addEventListener("click", () => openDlg(locDlg));
+  if (cfgClose) cfgClose.addEventListener("click", () => cfgDlg.close());
+  if (locClose) locClose.addEventListener("click", () => { locDlg.close(); refreshLocState(); });
+  [cfgDlg, locDlg].forEach((d) => {
+    if (d) d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
+  });
+
+  // One-line detector summary for the slim card: backend + model + depth.
+  const BACKEND_NAMES = { api: "API", browser: "Browser SAM", clip: "CLIP", mobilenet: "MobileNet" };
+  function refreshDetectorSummary() {
+    if (!detectorSummary) return;
+    const b = BACKEND_NAMES[samBackend()] || samBackend();
+    const bits = [b];
+    if (samBackend() === "api" && modelInput.value.trim()) bits.push(modelInput.value.trim());
+    const db = depthBackend ? depthBackend.value : "";
+    bits.push(db === "yolo" ? "YOLO depth" : db === "da" ? "DA depth" : "auto depth");
+    detectorSummary.textContent = bits.join(" · ");
+  }
+  if (cfgDlg) cfgDlg.addEventListener("change", refreshDetectorSummary);
+  refreshDetectorSummary();
+
+  // One-line location state for the photo card.
+  function refreshLocState() {
+    if (!locState) return;
+    const m = currentManual();
+    if (m) locState.textContent = `Location: manual override ${m.lat.toFixed(5)}, ${m.lon.toFixed(5)}.`;
+    else if (gps) locState.textContent = `Location: live fix ${gps.lat.toFixed(5)}, ${gps.lon.toFixed(5)} (photo EXIF wins when present).`;
+    else locState.textContent = "Location: photo EXIF when present, else live fix.";
+  }
+  refreshLocState();
+
+  // Prompts with optional geometry: "door, steps |line" marks steps as
+  // a linear feature (map polyline); everything else is a point pin.
+  function parsePrompts(value) {
+    const out = [];
+    for (const part of String(value || "").split(",")) {
+      const m = part.match(/^(.*?)\|\s*(lines?|points?)\s*$/i);
+      if (m) {
+        if (m[1].trim()) out.push({ name: m[1].trim(), geom: /^lines?$/i.test(m[2]) ? "line" : "point" });
+      } else if (part.trim()) {
+        out.push({ name: part.trim(), geom: "point" });
+      }
+    }
+    return out.slice(0, 10);
+  }
+  function geomsMap(list) {
+    const o = {};
+    for (const p of list || []) {
+      if (p.geom === "line" && p.name) o[p.name.toLowerCase()] = "line";
+    }
+    return o;
+  }
 
   // Typed correction wins over everything (photo EXIF and button fix).
   function currentManual() {
@@ -147,13 +279,25 @@
     const f = fileInput.files[0];
     if (!f) return;
     fileBlob = f;
+    // A manual location override belongs to the photo it was made for:
+    // a drag-correction from a previous image must not silently hijack
+    // this photo's EXIF (it sent prefer=manual, so Re-project kept the
+    // old pins instead of relocating). The GPS button fix still carries
+    // over; re-drag or re-type per photo as needed.
+    if (manualLat.value || manualLon.value) {
+      manualLat.value = "";
+      manualLon.value = "";
+      manualClearedNote = "Cleared the previous photo's manual location override — ";
+    }
     previewExif(f);
     const url = URL.createObjectURL(f);
     const img = new Image();
     img.onload = () => {
       imgEl = img; URL.revokeObjectURL(url); boxes = []; sentSize = null;
       origBoxes = [];
-      exportBtn.disabled = true; pngBtn.disabled = true; reprojectBtn.disabled = true;
+      lastDepth = null;
+      exportBtn.disabled = true; reprojectBtn.disabled = true;
+      refreshLocState();
       draw(); renderList();
     };
     img.onerror = () => setStatus("Could not read that image.", true);
@@ -168,6 +312,7 @@
         gps = { lat: p.coords.latitude, lon: p.coords.longitude,
                 accuracyM: p.coords.accuracy, at: new Date(p.timestamp).toISOString() };
         gpsOut.textContent = `Lat ${gps.lat.toFixed(6)}, lon ${gps.lon.toFixed(6)} (±${Math.round(gps.accuracyM)} m, ${gps.at})`;
+        refreshLocState();
       },
       (e) => { gpsOut.textContent = `Location failed: ${e.message}`; },
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
@@ -176,12 +321,14 @@
 
   sendBtn.addEventListener("click", async () => {
     if (!fileBlob) { setStatus("Pick a photo first.", true); return; }
-    const prompts = promptsInput.value.split(",").map(s => s.trim()).filter(Boolean);
+    const parsed = parsePrompts(promptsInput.value);
+    const prompts = parsed.map((p) => p.name);
+    const promptGeoms = geomsMap(parsed);
     // MobileNet finds its own fixed vocabulary — prompts are ignored.
     if (!prompts.length && samBackend() !== "mobilenet") { setStatus("Enter at least one object prompt.", true); return; }
     setStatus("Sending…");
     try {
-      const data = await postSam(fileBlob, prompts);
+      const data = await postSam(fileBlob, prompts, promptGeoms);
       lastRaw = data;
       rawOut.textContent = JSON.stringify(data, null, 2);
       // Meta, browser-local SAM and MobileNet return pixels in the sent
@@ -202,6 +349,10 @@
       if (rescale !== 1) boxes.forEach((b) => {
         b.x1 *= rescale; b.x2 *= rescale; b.y1 *= rescale; b.y2 *= rescale;
       });
+      // Direct boxes carry no geom: fall back to the prompt's |line flag.
+      boxes.forEach((b) => {
+        if (!b.geom) b.geom = promptGeoms[(b.label || "").toLowerCase()] || "point";
+      });
       sentSize = (direct && data.sentW)
         ? { w: data.sentW, h: data.sentH }
         : { w: canvas.width, h: canvas.height };
@@ -211,16 +362,16 @@
       let extra = "";
       if (direct) {
         setStatus(`SAM finished — ${boxes.length} box(es). Starting depth processing…`);
-        extra = await projectMetaBoxes(data);
+        extra = await projectMetaBoxes(data, promptGeoms);
       }
       else {
         setStatus(`SAM finished — ${boxes.length} box(es). Starting depth processing…`);
-        extra = gpsNote(data.gps_source) + headingNote(data); showDepth(data.depth_png);
+        extra = gpsNote(data.gps_source) + headingNote(data); showDepth(data.depth_png, data);
+        setLastDepth(data);
         origBoxes = rawDetections(data); // backend boxes are already original-px
       }
       draw(); renderList();
       exportBtn.disabled = boxes.length === 0;
-      pngBtn.disabled = boxes.length === 0;
       reprojectBtn.disabled = origBoxes.length === 0;
       if (direct && data.results.length > boxes.length) {
         setStatus(`Done — ${boxes.length} box(es) drawn (${data.results.length - boxes.length} dropped as invalid).`);
@@ -241,9 +392,13 @@
     return el ? el.value : "api";
   }
 
-  async function postSam(blob, prompts) {
+  function geomsField(fd, geoms) {
+    if (geoms && Object.keys(geoms).length) fd.append("geoms", JSON.stringify(geoms));
+  }
+
+  async function postSam(blob, prompts, geoms) {
     if (samBackend() === "browser") return postSamLocal(blob, prompts);
-    if (samBackend() === "clip") return postSamClip(blob, prompts);
+    if (samBackend() === "clip") return postSamClip(blob, prompts, geoms);
     if (samBackend() === "mobilenet") return postSamMobileNet();
     if (isMetaEndpoint(endpointInput.value)) return postSamMeta(blob, prompts);
     // Generic detector-style backend: multipart image + JSON prompts.
@@ -274,7 +429,7 @@
   // uploaded original's pixels first; results merge back by index.
   // Absence of a backend (static hosting) is not an error — boxes stay.
   // Returns a status suffix ("" when nothing to report).
-  async function projectMetaBoxes(data) {
+  async function projectMetaBoxes(data, geoms) {
     // No manual heading is fine: the backend falls back to the photo's
     // EXIF direction when present.
     const hdg = currentHeading();
@@ -293,6 +448,8 @@
     if (hdg != null) fd.append("heading", String(hdg));
     fd.append("hfov", hfovInput.value || "60");
     fd.append("max_range", rangeInput.value || "30");
+    depthFields(fd);
+    geomsField(fd, geoms);
     let res;
     try {
       res = await fetch("/api/project", { method: "POST", body: fd });
@@ -301,11 +458,13 @@
     }
     if (!res.ok) return " Projection failed — boxes only.";
     const proj = await res.json();
-    showDepth(proj.depth_png);
+    showDepth(proj.depth_png, proj);
+    setLastDepth(proj);
     (proj.detections || []).forEach((d, i) => {
       if (!boxes[i]) return;
       if (d.geo) boxes[i].geo = d.geo;
       if (d.snapped) boxes[i].snapped = d.snapped;
+      if (d.geom) boxes[i].geom = d.geom;
       if (d.geo_error) boxes[i].geo_error = d.geo_error;
     });
     const n = (proj.detections || []).filter((d) => d.geo).length;
@@ -347,16 +506,18 @@
   // Local CLIP windows: the backend scores sliding windows against the
   // prompts — offline after a one-time ~350 MB download, coarse boxes.
   // Reply shape matches /api/detect, so the normal path below just works.
-  async function postSamClip(blob, prompts) {
+  async function postSamClip(blob, prompts, geoms) {
     setStatus("Scoring windows with local CLIP (first run downloads weights)…");
     const fd = new FormData();
     fd.append("image", blob);
     fd.append("concepts", JSON.stringify(prompts));
+    geomsField(fd, geoms);
     locationFields(fd);
     const hdg = currentHeading();
     if (hdg != null) fd.append("heading", String(hdg));
     fd.append("hfov", hfovInput.value || "60");
     fd.append("max_range", rangeInput.value || "30");
+    depthFields(fd);
     fd.append("detector", "clip");
     const res = await fetch("/api/detect", { method: "POST", body: fd });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
@@ -574,6 +735,7 @@
                  maskH: it.maskH ?? null, maskW: it.maskW ?? null,
                  maskPayload: it.maskPayload ?? null,
                  geo: it.geo ?? null, snapped: it.snapped ?? null,
+                 geom: it.geom ?? null,
                  geo_error: it.geo_error ?? null });
     }
     return out;
@@ -614,9 +776,24 @@
     });
   }
 
+  // Export menu: one compact EXPORT button with GeoJSON / PNG actions.
+  exportBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    exportMenu.hidden = !exportMenu.hidden;
+  });
+  document.addEventListener("click", (e) => {
+    if (!exportMenu.hidden && !e.target.closest(".export-wrap")) exportMenu.hidden = true;
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !exportMenu.hidden) exportMenu.hidden = true;
+    if (e.key === "Escape" && measuring) setMeasuring(false);
+  });
+  exportGeoBtn.addEventListener("click", () => { exportMenu.hidden = true; exportGeoJSON(); });
+  exportPngBtn.addEventListener("click", () => { exportMenu.hidden = true; exportPNG(); });
+
   // Full-resolution export: re-renders the photo at the size SAM saw it
   // with the boxes scaled up, then downloads a PNG.
-  pngBtn.addEventListener("click", () => {
+  function exportPNG() {
     if (!imgEl || !boxes.length || !sentSize) return;
     const c = document.createElement("canvas");
     c.width = sentSize.w; c.height = sentSize.h;
@@ -634,7 +811,7 @@
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     }, "image/png");
-  });
+  }
 
   // Preferred map pin for a box: OSM-snapped outline point, else the
   // depth-projected point, else the camera location, else nothing.
@@ -651,6 +828,7 @@
   }
 
   function renderList() {
+    updateOsm(); // snaps + OSM matches first: the list links use moved positions
     boxList.innerHTML = "";
     if (!boxes.length) { boxList.innerHTML = '<li class="hint">No boxes.</li>'; return; }
     boxes.forEach((b) => {
@@ -658,9 +836,10 @@
       const coords = `[${[b.x1, b.y1, b.x2, b.y2].map(v => Math.round(v)).join(", ")} px]`;
       const score = b.score == null ? "" : ` — ${(b.score * 100).toFixed(1)}%`;
       const mask = b.maskPayload ? " +mask" : "";
-      li.textContent = `${b.label}${score} ${coords}${mask}`;
+      const gl = b.geom === "line" ? " · line" : "";
+      li.textContent = `${b.label}${score} ${coords}${mask}${gl}`;
       if (b.geo) {
-        const pin = pinOf(b);
+        const pin = effPin(b);
         const span = document.createElement("span");
         const px = b.geo.pixel ? `pixel (${b.geo.pixel.x}, ${b.geo.pixel.y})` : "pixel ?";
         const enu = b.geo.enu_m
@@ -668,7 +847,9 @@
           : "x/y/z ?";
         span.textContent = ` approx ${b.geo.lat.toFixed(6)}, ${b.geo.lon.toFixed(6)}` +
           ` (${b.geo.distance_m.toFixed(1)} m @ ${b.geo.bearing_deg.toFixed(1)}°)` +
-          (b.snapped ? " — on building outline" : "");
+          (b.snapped ? " — on building outline" : "") +
+          (b.pathSnapInfo ? ` — path-snapped ${b.pathSnapInfo.dist.toFixed(1)} m` : "") +
+          (b.osm ? ` — OSM ${osmDescribe(b.osm.tags)} ${b.osm.dist.toFixed(1)} m` : "");
         li.appendChild(document.createElement("br"));
         li.appendChild(span);
         const sub = document.createElement("span");
@@ -679,7 +860,8 @@
         a.href = osmUrl(pin.lat, pin.lon);
         a.target = "_blank";
         a.rel = "noopener";
-        a.textContent = pin.kind === "snapped" ? "OpenStreetMap pin (snapped)" : "OpenStreetMap pin";
+        a.textContent = pin.kind === "snapped" ? "OpenStreetMap pin (snapped)"
+          : pin.kind === "path" ? "OpenStreetMap pin (path-snapped)" : "OpenStreetMap pin";
         li.appendChild(document.createTextNode(" "));
         li.appendChild(a);
       } else if (b.geo_error) {
@@ -693,16 +875,22 @@
     drawDepth(); // overlay follows boxes (and their distances) everywhere
   }
 
-  exportBtn.addEventListener("click", () => {
+  function exportGeoJSON() {
     const hdg = currentHeading();
     const gj = { type: "FeatureCollection", features: boxes.map((b) => {
-      const pin = pinOf(b);
+      const pin = effPin(b);
+      const ends = b.geom === "line" ? effEnds(b) : null;
+      const geometry = ends
+        ? { type: "LineString", coordinates: [[ends[0].lon, ends[0].lat], [ends[1].lon, ends[1].lat]] }
+        : pin ? { type: "Point", coordinates: [pin.lon, pin.lat] } : null;
       return {
         type: "Feature",
-        geometry: pin ? { type: "Point", coordinates: [pin.lon, pin.lat] } : null,
+        geometry,
         properties: { label: b.label, score: b.score,
-          pinKind: pin ? pin.kind : null, // snapped | projected | camera
+          geom: b.geom || "point",
+          pinKind: pin ? pin.kind : null, // path | snapped | projected | camera
           geo: b.geo ?? null, snapped: b.snapped ?? null,
+          osm: b.osm ?? null, pathSnap: b.pathSnapInfo ?? null,
           cameraHeadingDeg: hdg,
           boxPx: [b.x1, b.y1, b.x2, b.y2].map(Math.round),
           maskH: b.maskH, maskW: b.maskW, maskPayload: b.maskPayload,
@@ -715,11 +903,11 @@
     a.download = "microgeographies-results.geojson";
     a.click();
     URL.revokeObjectURL(a.href);
-  });
+  }
 
   function setStatus(msg, isErr) {
     statusOut.textContent = msg;
-    statusOut.style.color = isErr ? "#b00020" : "";
+    statusOut.classList.toggle("status-error", !!isErr);
   }
 
   // Processing routes: one mode switch at the top, each mode showing
@@ -727,12 +915,14 @@
   // the two routes that need pins (single photo, batch); the 3D route
   // is COLMAP geometry with depth-free labels.
   const MODES = {
-    single: { sections: ["secPhoto", "secObjects", "secLoc", "secDetector", "secResults"],
+    single: { sections: ["secPhoto", "secObjects", "secDetector", "secResults", "secMatch", "secStage"],
               note: "Single-photo route: detect, depth, map pin." },
     "set-depth": { sections: ["secSet", "secBatch"],
               note: "Set route: the shared zip + concepts above; depth runs per photo for pins." },
     "set-3d": { sections: ["secSet", "secSfm"],
               note: "Set route: the shared zip + concepts above; COLMAP only — no depth pass." },
+    "set-video": { sections: ["secVideo"],
+              note: "Photo + video route: DA3 point cloud, tagged features, map pins." },
   };
   const modeOut = $("modeOut");
   function syncSetLabellingControls() {
@@ -752,8 +942,8 @@
     });
     const vis = MODES[mode].sections;
     let n = 0;
-    ["secPhoto", "secObjects", "secLoc", "secDetector", "secResults",
-     "secSet", "secBatch", "secSfm"].forEach((id) => {
+    ["secPhoto", "secObjects", "secDetector", "secResults", "secMatch", "secStage",
+     "secSet", "secBatch", "secSfm", "secVideo"].forEach((id) => {
       const sec = $(id);
       if (!sec) return;
       const show = vis.indexOf(id) >= 0;
@@ -765,7 +955,14 @@
       }
     });
     if (modeOut) modeOut.textContent = MODES[mode].note;
-    document.body.classList.toggle("wide", mode === "set-3d");
+    document.body.classList.toggle("wide", mode === "set-3d" || mode === "set-video");
+    document.body.dataset.mode = mode;
+    // The Leaflet map lives in the fixed single-mode stage: re-measure
+    // it whenever single mode (re)appears, or tiles render for a
+    // zero-size box.
+    if (mode === "single" && map) {
+      requestAnimationFrame(() => map.invalidateSize());
+    }
     syncSetLabellingControls();
     try { localStorage.setItem("mg.mode", mode); } catch (e) { /* private mode */ }
   }
@@ -832,13 +1029,15 @@
   batchBtn.addEventListener("click", async () => {
     const zf = zipInput.files[0];
     if (!zf) { batchOut.textContent = "Pick a zip of photos first."; return; }
-    const prompts = setConcepts.value.split(",").map(s => s.trim()).filter(Boolean);
+    const setParsed = parsePrompts(setConcepts.value);
+    const prompts = setParsed.map((p) => p.name);
     if (!prompts.length) { batchOut.textContent = "Enter at least one concept above."; return; }
     batchOut.textContent = "Processing… depth runs per photo, so a dozen images take a while.";
     try {
       const fd = new FormData();
       fd.append("zipfile", zf);
       fd.append("concepts", JSON.stringify(prompts));
+      geomsField(fd, geomsMap(setParsed));
       fd.append("detector", (setDetector && setDetector.value) || "sam");
       zipDetectorFields(fd);
       locationFields(fd);
@@ -846,6 +1045,7 @@
       if (hdg != null) fd.append("heading", String(hdg));
       fd.append("hfov", hfovInput.value || "60");
       fd.append("max_range", rangeInput.value || "30");
+      depthFields(fd);
       fd.append("merge_radius_m", radiusInput.value || "8");
       fd.append("sim_min", simInput.value || "0.75");
       const res = await fetch("/api/batch", { method: "POST", body: fd });
@@ -884,7 +1084,9 @@
       div.appendChild(h);
       const meta = document.createElement("div");
       const loc = im.location ? `${im.location.lat.toFixed(5)}, ${im.location.lon.toFixed(5)}` : "no location";
-      meta.textContent = `${loc} (${im.gps_source}) — ${im.detections.length} box(es)`;
+      const dep = im.depth_backend === "yolo" ? " — depth: YOLO26 (metric)"
+        : im.depth_backend === "da" ? " — depth: DA (relative)" : "";
+      meta.textContent = `${loc} (${im.gps_source}) — ${im.detections.length} box(es)${dep}`;
       div.appendChild(meta);
       const ul = document.createElement("ul");
       im.detections.forEach((d) => {
@@ -1113,7 +1315,12 @@
     function expand(value) {
       $("sfmWrap").classList.toggle("expanded", value);
       document.body.classList.toggle("viewer-expanded", value);
-      $("toolExpand").textContent = value ? "Restore viewer" : "Expand viewer";
+      // Icon button: update the accessible label, not the whole content
+      // (which holds the SVG icon + visually-hidden text).
+      const label = value ? "Restore viewer" : "Expand viewer";
+      const vh = $("toolExpand").querySelector(".vh");
+      if (vh) vh.textContent = label;
+      $("toolExpand").setAttribute("aria-label", label);
       $("toolExpand").setAttribute("aria-pressed", String(value));
     }
     $("toolExpand").addEventListener("click", () => expand(!$("sfmWrap").classList.contains("expanded")));
@@ -1454,6 +1661,183 @@
     }
   });
 
+  // Photo + video workflow (/api/video-cloud): DA3 cloud -> tagged
+  // features -> map pins. Self-contained; the other routes are untouched.
+  const videoZip = $("videoZip"), videoConcepts = $("videoConcepts"),
+    videoDetector = $("videoDetector"), videoToken = $("videoToken"),
+    videoTokenRow = $("videoTokenRow"), videoSnap = $("videoSnap"),
+    videoBtn = $("videoBtn"), videoOut = $("videoOut"),
+    videoProg = $("videoProg"), videoLog = $("videoLog"),
+    videoFeatures = $("videoFeatures"), videoExportBtn = $("videoExportBtn"),
+    videoMapNote = $("videoMapNote");
+  let videoViewer = null, videoLib = null, videoMap = null, videoMarkers = null;
+  let videoData = null;
+
+  videoDetector.addEventListener("change", () => {
+    videoTokenRow.hidden = videoDetector.value !== "api";
+  });
+
+  async function readNdjson(res, onLog) {
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "", result = null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (value) buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        const m = JSON.parse(line);
+        if (m.type === "log" && onLog) onLog(m.line);
+        else if (m.type === "result") result = m.data;
+      }
+      if (done) break;
+    }
+    return result;
+  }
+
+  videoBtn.addEventListener("click", async () => {
+    const zf = videoZip.files[0];
+    if (!zf) { videoOut.textContent = "Pick the zip (1 photo + 1 video) first."; return; }
+    const parsed = parsePrompts(videoConcepts.value);
+    const fd = new FormData();
+    fd.append("zipfile", zf);
+    fd.append("concepts", JSON.stringify(parsed.map((p) => p.name)));
+    geomsField(fd, geomsMap(parsed));
+    fd.append("detector", videoDetector.value || "sam");
+    if (videoDetector.value === "api") fd.append("sam_token", videoToken.value || "");
+    if (videoSnap.checked) fd.append("snap", "1");
+    videoBtn.disabled = true;
+    videoProg.hidden = false;
+    videoLog.hidden = false;
+    videoLog.textContent = "";
+    videoOut.textContent = "Building…";
+    try {
+      const res = await fetch("/api/video-cloud", { method: "POST", body: fd });
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try { const j = await res.json(); msg = j.error || msg; } catch (e) { /* keep status */ }
+        throw new Error(msg);
+      }
+      const data = await readNdjson(res, (line) => {
+        videoLog.textContent += line + "\n";
+        videoLog.scrollTop = videoLog.scrollHeight;
+      });
+      if (!data) throw new Error("the video stream ended before any result arrived");
+      if (data.error) throw new Error(data.error);
+      videoData = data;
+      await renderVideoResult(data);
+    } catch (e) {
+      videoOut.textContent = `Error: ${e.message}`;
+    } finally {
+      videoBtn.disabled = false;
+      videoProg.hidden = true;
+    }
+  });
+
+  async function renderVideoResult(data) {
+    // 3D cloud via the shared SfM viewer stack (read-only reuse).
+    videoLib = videoLib || await import("./sfm3d.js");
+    const cloud = videoLib.parsePly(data.ply || "");
+    if (!cloud.count) throw new Error("the server returned an empty point cloud");
+    const raw = data.point_labels || {};
+    const labels = [], votes = [];
+    for (let i = 0; i < cloud.count; i++) {
+      const info = raw[String(i)];
+      labels.push(info ? info.label : null);
+      votes.push(info ? (info.votes || 0) : 0);
+    }
+    videoViewer = videoViewer || videoLib.createViewer($("videoView"), $("videoPopup"));
+    videoViewer.setCloud(cloud.positions, cloud.colors,
+      videoLib.labeledColors(cloud.count, raw), labels, votes, data.cameras || []);
+    videoViewer.fitBounds();
+    $("videoEmpty").hidden = true;
+    const feats = data.features || [];
+    videoFeatures.innerHTML = "";
+    if (!feats.length) {
+      videoFeatures.innerHTML = '<li class="hint">No map features — no photo EXIF fix/heading, or no concept boxes matched the cloud.</li>';
+    }
+    feats.forEach((f) => {
+      const li = document.createElement("li");
+      const pin = f.snapped || f;
+      li.textContent = `${f.label} (${f.geom}) — ${f.count} pts — ` +
+        `${f.lat.toFixed(6)}, ${f.lon.toFixed(6)} · ${f.distance_m} m @ ${f.bearing_deg}°` +
+        (f.snapped ? ` → snapped outline ${f.snapped.lat.toFixed(6)}, ${f.snapped.lon.toFixed(6)}` : "");
+      li.title = "Click to centre the map";
+      li.style.cursor = "pointer";
+      li.addEventListener("click", () => {
+        if (videoMap) videoMap.setView([pin.lat, pin.lon], 20);
+      });
+      videoFeatures.appendChild(li);
+    });
+    renderVideoMap(data);
+    videoExportBtn.disabled = !feats.length;
+    const nLab = labels.filter(Boolean).length;
+    videoOut.textContent = `Done — ${cloud.count} point(s) from ${data.frames} frame(s)` +
+      (data.mock ? " (mock DA3)" : "") +
+      `, ${nLab} labelled, ${feats.length} map feature(s)` +
+      (data.warnings && data.warnings.length ? `. ${data.warnings.join(" ")}` : ".");
+  }
+
+  function renderVideoMap(data) {
+    const feats = data.features || [];
+    if (!feats.length) {
+      videoMapNote.textContent = "No feature pins — see above.";
+      return;
+    }
+    if (!window.L) { videoMapNote.textContent = "Map library unavailable (needs internet)."; return; }
+    if (!videoMap) {
+      videoMap = window.L.map("videoMap", { maxZoom: 22 });
+      window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 22, maxNativeZoom: 19, attribution: "&copy; OpenStreetMap contributors"
+      }).addTo(videoMap);
+      videoMarkers = window.L.layerGroup().addTo(videoMap);
+    }
+    videoMarkers.clearLayers();
+    const bounds = [];
+    if (data.location) {
+      window.L.marker([data.location.lat, data.location.lon]).addTo(videoMarkers)
+        .bindPopup("Photo (start)");
+      bounds.push([data.location.lat, data.location.lon]);
+    }
+    feats.forEach((f, i) => {
+      const desc = `<b>${f.label}</b> (${f.geom})<br>${f.count} labelled pts · ${f.distance_m} m @ ${f.bearing_deg}°`;
+      if (f.geom === "line" && f.endpoints) {
+        window.L.polyline(f.endpoints.map((e) => [e.lat, e.lon]),
+          { color: `hsl(${(i * 67) % 360} 90% 35%)`, weight: 4 })
+          .addTo(videoMarkers).bindPopup(desc);
+        f.endpoints.forEach((e) => bounds.push([e.lat, e.lon]));
+      } else {
+        const p = f.snapped || f;
+        window.L.marker([p.lat, p.lon]).addTo(videoMarkers).bindPopup(desc);
+        bounds.push([p.lat, p.lon]);
+      }
+    });
+    if (bounds.length > 1) videoMap.fitBounds(bounds, { padding: [20, 20] });
+    else videoMap.setView(bounds[0], 19);
+    videoMapNote.textContent = `${feats.length} feature(s) from photo ${data.gps_source || "?"} fix` +
+      (data.heading_deg != null ? `, heading ${data.heading_deg}°` : "") + ".";
+  }
+
+  videoExportBtn.addEventListener("click", () => {
+    if (!videoData) return;
+    const feats = videoData.features || [];
+    const gj = { type: "FeatureCollection", features: feats.map((f) => ({
+      type: "Feature",
+      geometry: f.geom === "line" && f.endpoints
+        ? { type: "LineString", coordinates: f.endpoints.map((e) => [e.lon, e.lat]) }
+        : { type: "Point", coordinates: [f.lon, f.lat] },
+      properties: f,
+    })) };
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(gj, null, 2)], { type: "application/geo+json" }));
+    a.download = "microgeographies-video-features.geojson";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
   // Raw detections out of a backend reply, untouched by canvas scaling:
   // [{label, box:[x1,y1,x2,y2] original-px, score}]. Our backend emits
   // {box,label,score}; other shapes pass through box/bbox/xyxy arrays.
@@ -1491,15 +1875,19 @@
       if (hdg != null) fd.append("heading", String(hdg));
       fd.append("hfov", hfovInput.value || "60");
       fd.append("max_range", rangeInput.value || "30");
+      depthFields(fd);
+      geomsField(fd, geomsMap(parsePrompts(promptsInput.value)));
       const res = await fetch("/api/project", { method: "POST", body: fd });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
       const proj = await res.json();
-      showDepth(proj.depth_png);
+      showDepth(proj.depth_png, proj);
+      setLastDepth(proj);
       let n = 0;
       (proj.detections || []).forEach((d, i) => {
         if (!boxes[i]) return;
         boxes[i].geo = d.geo || null;
         boxes[i].snapped = d.snapped || null;
+        if (d.geom) boxes[i].geom = d.geom;
         boxes[i].geo_error = d.geo_error || null;
         if (d.geo) n++;
       });
@@ -1512,15 +1900,31 @@
     }
   });
 
+  let lastDepth = null; // {grid, metric} from the last depth pass, for hover readouts
+  function setLastDepth(info) {
+    lastDepth = info && Array.isArray(info.depth_grid) && info.depth_grid.length
+      ? { grid: info.depth_grid, metric: Array.isArray(info.metric_grid) ? info.metric_grid : null }
+      : null;
+  }
+
   let depthImage = null; // loaded colorized depth PNG for the overlay
 
-  function showDepth(dataUrl) {
+  function depthLabel(info) {
+    if (!info) return "";
+    if (info.depth_backend === "yolo") {
+      return ` via YOLO26-depth${info.depth_model ? " " + info.depth_model : ""} (metric metres)`;
+    }
+    if (info.depth_backend === "da") return " via Depth Anything (relative)";
+    return "";
+  }
+
+  function showDepth(dataUrl, info) {
     if (!dataUrl) return;
     const img = new Image();
     img.onload = () => {
       depthImage = img;
       drawDepth();
-      depthNote.textContent = "Monocular depth — blue far, red near. " +
+      depthNote.textContent = `Monocular depth${depthLabel(info)} — blue far, red near. ` +
         "Boxes carry label + metres so placement and range read off the colors.";
     };
     img.src = dataUrl;
@@ -1561,6 +1965,374 @@
     });
   }
 
+  // ---- Map-match: user-supplied OSM GeoJSON vs detections ----
+  let osmData = null; // {points: [{lon,lat,tags}], lines: [{pts: [[lon,lat]..], tags}]}
+  let osmLayer = null;
+
+  function haversineM(lat1, lon1, lat2, lon2) {
+    const R = 6371000, p1 = lat1 * Math.PI / 180, p2 = lat2 * Math.PI / 180;
+    const dp = (lat2 - lat1) * Math.PI / 180, dl = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+
+  function nearestOnSeg(lat, lon, la1, lo1, la2, lo2) {
+    // Nearest point on a segment, equirectangular metres (street scale).
+    const kx = 6371000 * Math.cos(lat * Math.PI / 180), ky = 6371000;
+    const torad = Math.PI / 180;
+    const px = lon * torad * kx, py = lat * torad * ky;
+    const ax = lo1 * torad * kx, ay = la1 * torad * ky;
+    const bx = lo2 * torad * kx, by = la2 * torad * ky;
+    const dx = bx - ax, dy = by - ay;
+    const denom = dx * dx + dy * dy;
+    const t = denom ? Math.min(1, Math.max(0, ((px - ax) * dx + (py - ay) * dy) / denom)) : 0;
+    const cx = ax + t * dx, cy = ay + t * dy;
+    return { lat: cy / ky / torad, lon: cx / kx / torad, dist: Math.hypot(px - cx, py - cy) };
+  }
+
+  function loadOsm(obj) {
+    const feats = obj && obj.type === "FeatureCollection" && Array.isArray(obj.features) ? obj.features : null;
+    if (!feats) throw new Error("not a GeoJSON FeatureCollection");
+    const points = [], lines = [];
+    const centroid = (ring) => {
+      let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+      for (const c of ring || []) {
+        x0 = Math.min(x0, c[0]); x1 = Math.max(x1, c[0]);
+        y0 = Math.min(y0, c[1]); y1 = Math.max(y1, c[1]);
+      }
+      return [(x0 + x1) / 2, (y0 + y1) / 2];
+    };
+    for (const f of feats) {
+      const g = f && f.geometry, tags = (f && f.properties) || {};
+      if (!g || !g.coordinates) continue;
+      if (g.type === "Point") points.push({ lon: g.coordinates[0], lat: g.coordinates[1], tags });
+      else if (g.type === "MultiPoint") for (const c of g.coordinates) points.push({ lon: c[0], lat: c[1], tags });
+      else if (g.type === "LineString") lines.push({ pts: g.coordinates, tags });
+      else if (g.type === "MultiLineString") for (const l of g.coordinates) lines.push({ pts: l, tags });
+      else if (g.type === "Polygon") {
+        for (const r of g.coordinates) lines.push({ pts: r, tags });
+        const c = centroid(g.coordinates[0]);
+        points.push({ lon: c[0], lat: c[1], tags });
+      } else if (g.type === "MultiPolygon") {
+        for (const p of g.coordinates) {
+          for (const r of p) lines.push({ pts: r, tags });
+          const c = centroid(p[0]);
+          points.push({ lon: c[0], lat: c[1], tags });
+        }
+      }
+    }
+    osmData = { points, lines };
+    return { nPoints: points.length, nLines: lines.length };
+  }
+
+  if (osmFile) osmFile.addEventListener("change", () => {
+    const f = osmFile.files[0];
+    if (!f) return;
+    f.text().then((t) => {
+      const n = loadOsm(JSON.parse(t));
+      matchOut.textContent = `${f.name}: ${n.nPoints} point(s), ${n.nLines} path(s) loaded.`;
+      updateOsm();
+      renderMap();
+    }).catch((e) => { matchOut.textContent = `Could not read GeoJSON: ${e.message}`; });
+  });
+  if (matchTol) matchTol.addEventListener("change", () => { updateOsm(); renderMap(); });
+  if (snapPath) snapPath.addEventListener("change", () => { updateOsm(); renderMap(); });
+  function matchTolerance() {
+    const v = parseFloat(matchTol && matchTol.value);
+    return Number.isFinite(v) && v > 0 ? v : 15;
+  }
+
+  // Label → OSM tag affinity: which mapped tags count as "the same kind
+  // of thing" as a detection label, and how strongly (0–4).
+  const OSM_AFFINITY = [
+    { re: /door|entrance|gate|portal|doorway/i, keys: ["entrance", "door"], w: 3 },
+    { re: /door|entrance|gate|portal|doorway/i, keys: ["building"], w: 1 },
+    { re: /window/i, keys: ["window"], w: 3 },
+    { re: /step|stair/i, keys: ["highway"], want: /steps/i, w: 3 },
+    { re: /step|stair/i, keys: ["steps", "footway"], w: 2 },
+    { re: /bin|waste|litter|trash|recycl|dumpster/i, keys: ["amenity", "waste", "recycling"], w: 3 },
+    { re: /wall/i, keys: ["barrier"], want: /wall/i, w: 3 },
+    { re: /wall|fence|rail/i, keys: ["barrier", "building"], w: 2 },
+    { re: /building|house|shop|office|garage/i, keys: ["building"], w: 3 },
+    { re: /road|street|avenue/i, keys: ["highway"], w: 3 },
+    { re: /path|footway|sidewalk|pavement|trail|cycle|bike/i, keys: ["highway"], want: /footway|path|cycleway|steps|track/i, w: 3 },
+    { re: /path|footway|sidewalk|pavement|trail/i, keys: ["footway", "sidewalk"], w: 2 },
+    { re: /bench/i, keys: ["amenity"], want: /bench/i, w: 3 },
+    { re: /lamp|light|pole/i, keys: ["highway", "man_made"], want: /lamp|light|pole|utility/i, w: 2 },
+    { re: /bollard|post/i, keys: ["barrier"], want: /bollard/i, w: 3 },
+    { re: /bus|stop/i, keys: ["highway", "public_transport"], want: /bus/i, w: 3 },
+    { re: /hydrant/i, keys: ["emergency"], want: /hydrant/i, w: 3 },
+    { re: /tree/i, keys: ["natural"], want: /tree/i, w: 3 },
+  ];
+  function osmAffinity(label, tags) {
+    let best = 0;
+    for (const r of OSM_AFFINITY) {
+      if (!r.re.test(label || "")) continue;
+      for (const k of r.keys) {
+        if (tags[k] == null || tags[k] === "") continue;
+        let w = r.w;
+        if (r.want && r.want.test(String(tags[k]))) w += 1;
+        if (w > best) best = w;
+      }
+    }
+    const nm = tags.name || tags.ref;
+    if (nm && String(nm).toLowerCase().indexOf(String(label).toLowerCase()) !== -1 && best < 2) best = 2;
+    return Math.min(4, best);
+  }
+  function osmDescribe(tags) {
+    if (tags.name) return String(tags.name);
+    const pick = ["entrance", "door", "highway", "building", "amenity", "barrier", "natural", "shop"].find((k) => tags[k]);
+    return pick ? `${pick}=${tags[pick]}` : "tagged feature";
+  }
+  function osmPopup(tags) {
+    const rows = Object.entries(tags || {}).slice(0, 8).map(([k, v]) => `${k}=${v}`).join("<br>");
+    return `<b>${osmDescribe(tags || {})}</b>` + (rows ? `<br>${rows}` : "");
+  }
+
+  function isPathLine(tags) {
+    if (tags.highway || tags.footway || tags.sidewalk || tags.cycleway) return true;
+    return /path|road|street|lane|way|trail|track|footway|sidewalk/i.test(String(tags.name || ""));
+  }
+  function snapToPath(lat, lon) {
+    // Nearest point on any OSM path/road line, or null when disabled,
+    // empty, or beyond tolerance.
+    if (!snapPath || !snapPath.checked || !osmData) return null;
+    const tol = matchTolerance();
+    let best = null;
+    for (const ln of osmData.lines) {
+      if (!isPathLine(ln.tags)) continue;
+      for (let i = 0; i + 1 < ln.pts.length; i++) {
+        const a = ln.pts[i], b = ln.pts[i + 1];
+        const n = nearestOnSeg(lat, lon, a[1], a[0], b[1], b[0]);
+        if (n.dist <= tol && (!best || n.dist < best.dist)) {
+          best = { lat: n.lat, lon: n.lon, dist: n.dist, tags: ln.tags };
+        }
+      }
+    }
+    return best;
+  }
+
+  // Effective positions: path-snapped when Snap-to-path moved the pin,
+  // else the server pin (building-outline snap, else projection).
+  function effPin(b) {
+    if (b.pathPin) return { lon: b.pathPin.lon, lat: b.pathPin.lat, kind: "path" };
+    return pinOf(b);
+  }
+  function effEnds(b) {
+    if (b.pathEnds) return b.pathEnds;
+    if (b.geo && Array.isArray(b.geo.endpoints) && b.geo.endpoints.length === 2) {
+      return b.geo.endpoints.map((e) => ({ lat: e.lat, lon: e.lon }));
+    }
+    return null;
+  }
+
+  function matchOsm(b, tol) {
+    // Best OSM feature near the box's effective position, ranked by
+    // label↔tag affinity, then distance. Lines match by nearest point.
+    const ends = b.geom === "line" ? effEnds(b) : null;
+    const anchor = ends
+      ? { lat: (ends[0].lat + ends[1].lat) / 2, lon: (ends[0].lon + ends[1].lon) / 2 }
+      : effPin(b);
+    if (!anchor) return null;
+    let best = null;
+    const consider = (lat, lon, tags, kind) => {
+      const dist = haversineM(anchor.lat, anchor.lon, lat, lon);
+      if (dist > tol) return;
+      const aff = osmAffinity(b.label || "", tags || {});
+      if (aff < 1) return;
+      const score = aff * 10 - dist;
+      if (!best || score > best.score) best = { lat, lon, dist, tags: tags || {}, kind, score };
+    };
+    for (const p of osmData.points) consider(p.lat, p.lon, p.tags, "point");
+    for (const ln of osmData.lines) {
+      for (let i = 0; i + 1 < ln.pts.length; i++) {
+        const a = ln.pts[i], c = ln.pts[i + 1];
+        const n = nearestOnSeg(anchor.lat, anchor.lon, a[1], a[0], c[1], c[0]);
+        consider(n.lat, n.lon, ln.tags, "line");
+      }
+    }
+    return best;
+  }
+
+  function updateOsm() {
+    // Recompute path snaps + OSM matches from current boxes. Snaps feed
+    // matching, the map, and exports — everything downstream uses the
+    // moved positions.
+    const tol = matchTolerance();
+    for (const b of boxes) {
+      b.pathPin = null; b.pathEnds = null; b.pathSnapInfo = null; b.osm = null;
+      if (!b.geo) continue;
+      if (snapPath && snapPath.checked && osmData) {
+        if (b.geom === "line") {
+          const ends = effEnds(b); // raw server endpoints (pathEnds just cleared)
+          if (ends) {
+            const s = ends.map((e) => snapToPath(e.lat, e.lon));
+            if (s[0] && s[1]) {
+              b.pathEnds = [{ lat: s[0].lat, lon: s[0].lon }, { lat: s[1].lat, lon: s[1].lon }];
+              b.pathSnapInfo = { dist: Math.max(s[0].dist, s[1].dist), tags: s[0].tags };
+            }
+          }
+        } else {
+          const p = pinOf(b);
+          if (p) {
+            const s = snapToPath(p.lat, p.lon);
+            if (s) {
+              b.pathPin = { lon: s.lon, lat: s.lat };
+              b.pathSnapInfo = { dist: s.dist, tags: s.tags };
+            }
+          }
+        }
+      }
+      if (osmData) b.osm = matchOsm(b, tol);
+    }
+    renderMatchList();
+    drawOsm();
+  }
+
+  function renderMatchList() {
+    if (!matchList) return;
+    matchList.innerHTML = "";
+    let any = false;
+    for (const b of boxes) {
+      if (!b.geo) continue;
+      any = true;
+      const li = document.createElement("li");
+      let text = `${b.label}: `;
+      if (b.pathSnapInfo) text += `snapped ${b.pathSnapInfo.dist.toFixed(1)} m to ${osmDescribe(b.pathSnapInfo.tags)}; `;
+      if (b.osm) {
+        const known = /door|entrance|gate/i.test(b.label || "") && (b.osm.tags.entrance || b.osm.tags.door);
+        text += known
+          ? `known entrance ${b.osm.dist.toFixed(1)} m away (${osmDescribe(b.osm.tags)})`
+          : `near ${osmDescribe(b.osm.tags)} ${b.osm.dist.toFixed(1)} m away`;
+      } else {
+        text += osmData ? `no OSM feature within ${matchTolerance()} m` : "no OSM data loaded";
+      }
+      li.textContent = text;
+      matchList.appendChild(li);
+    }
+    if (!any) matchList.innerHTML = '<li class="hint">No matches yet.</li>';
+  }
+
+  function drawOsm() {
+    if (!window.L || !map) return;
+    if (osmLayer) { osmLayer.remove(); osmLayer = null; }
+    if (!osmData) return;
+    osmLayer = window.L.layerGroup();
+    const matchedPts = boxes.map((b) => b.osm).filter((m) => m && m.kind === "point");
+    for (const p of osmData.points) {
+      const hit = matchedPts.some((m) => Math.abs(m.lat - p.lat) < 1e-9 && Math.abs(m.lon - p.lon) < 1e-9);
+      window.L.circleMarker([p.lat, p.lon], {
+        radius: hit ? 7 : 4, color: hit ? "#16a34a" : "#b45309",
+        weight: 2, fillOpacity: hit ? 0.5 : 0.25
+      }).bindPopup(osmPopup(p.tags)).addTo(osmLayer);
+    }
+    for (const ln of osmData.lines) {
+      window.L.polyline(ln.pts.map((c) => [c[1], c[0]]), {
+        color: "#b45309", weight: 2, opacity: 0.7
+      }).bindPopup(osmPopup(ln.tags)).addTo(osmLayer);
+    }
+    osmLayer.addTo(map);
+  }
+
+  // Measure tool: click the map to drop points; segments read in metres
+  // with 5 m ticks and a running total. Esc or re-toggle ends it.
+  let measuring = false, measurePts = [], measureLayer = null;
+  function setMeasuring(on) {
+    measuring = on;
+    if (measureBtn) {
+      measureBtn.setAttribute("aria-pressed", String(on));
+      measureBtn.classList.toggle("active", on);
+    }
+    if (map) {
+      map.getContainer().style.cursor = on ? "crosshair" : "";
+      if (on) map.doubleClickZoom.disable();
+      else map.doubleClickZoom.enable();
+    }
+    if (!on) {
+      measurePts = [];
+      if (measureLayer) { measureLayer.remove(); measureLayer = null; }
+    }
+  }
+  function measureClick(e) {
+    if (!measuring || !map) return;
+    measurePts.push(e.latlng);
+    drawMeasure();
+  }
+  function drawMeasure() {
+    if (!map || !window.L) return;
+    if (measureLayer) measureLayer.remove();
+    measureLayer = window.L.layerGroup().addTo(map);
+    if (!measurePts.length) return;
+    window.L.polyline(measurePts.map((p) => [p.lat, p.lng]), { color: "#0ea5e9", weight: 3 }).addTo(measureLayer);
+    let total = 0;
+    for (let i = 0; i < measurePts.length; i++) {
+      const p = measurePts[i];
+      if (i > 0) {
+        const q = measurePts[i - 1];
+        const seg = haversineM(q.lat, q.lng, p.lat, p.lng);
+        const n = Math.floor(seg / 5);
+        for (let k = 1; k <= n; k++) {
+          const f = (k * 5) / seg;
+          window.L.circleMarker([q.lat + (p.lat - q.lat) * f, q.lng + (p.lng - q.lng) * f],
+            { radius: 2, color: "#0ea5e9", weight: 1, fillOpacity: 1 }).addTo(measureLayer);
+        }
+        window.L.marker([(q.lat + p.lat) / 2, (q.lng + p.lng) / 2], {
+          interactive: false,
+          icon: window.L.divIcon({ className: "measure-tag", html: `${seg.toFixed(1)} m`, iconSize: null })
+        }).addTo(measureLayer);
+        total += seg;
+      }
+      window.L.circleMarker([p.lat, p.lng], { radius: 4, color: "#0ea5e9", weight: 2, fillOpacity: 0.6 }).addTo(measureLayer);
+    }
+    if (measurePts.length > 1) {
+      const last = measurePts[measurePts.length - 1];
+      window.L.marker([last.lat, last.lng], {
+        interactive: false,
+        icon: window.L.divIcon({ className: "measure-tag measure-total", html: `total ${total.toFixed(1)} m`, iconSize: null })
+      }).addTo(measureLayer);
+    }
+  }
+  if (measureBtn) measureBtn.addEventListener("click", () => setMeasuring(!measuring));
+
+  // Hover readouts: class labels over the photo, metres over the depth map.
+  function canvasPos(evt, cv) {
+    const r = cv.getBoundingClientRect();
+    return { x: (evt.clientX - r.left) / r.width * cv.width, y: (evt.clientY - r.top) / r.height * cv.height };
+  }
+  function showTip(evt, text) {
+    if (!hoverTip) return;
+    hoverTip.textContent = text;
+    hoverTip.hidden = false;
+    hoverTip.style.left = (evt.clientX + 14) + "px";
+    hoverTip.style.top = (evt.clientY + 12) + "px";
+  }
+  function hideTip() { if (hoverTip) hoverTip.hidden = true; }
+  canvas.addEventListener("mousemove", (e) => {
+    if (!boxes.length) { hideTip(); return; }
+    const p = canvasPos(e, canvas);
+    const hit = boxes.filter((b) => p.x >= b.x1 && p.x <= b.x2 && p.y >= b.y1 && p.y <= b.y2);
+    if (!hit.length) { hideTip(); return; }
+    showTip(e, hit.map((b) => b.score == null ? b.label : `${b.label} ${(b.score * 100).toFixed(0)}%`).join(" · "));
+  });
+  canvas.addEventListener("mouseleave", hideTip);
+  $("depthCanvas").addEventListener("mousemove", (e) => {
+    if (!lastDepth) { hideTip(); return; }
+    const cv = $("depthCanvas");
+    const g = lastDepth.metric || lastDepth.grid;
+    const rows = g.length, cols = g[0].length;
+    const p = canvasPos(e, cv);
+    const c = Math.min(cols - 1, Math.max(0, Math.floor(p.x / cv.width * cols)));
+    const r = Math.min(rows - 1, Math.max(0, Math.floor(p.y / cv.height * rows)));
+    let m;
+    if (lastDepth.metric) m = g[r][c];
+    else {
+      const maxr = parseFloat(rangeInput.value) || 30;
+      m = 0.5 + (1 - g[r][c]) * (maxr - 0.5);
+    }
+    showTip(e, `${Number(m).toFixed(1)} m`);
+  });
+  $("depthCanvas").addEventListener("mouseleave", hideTip);
+
   // Map view: camera fix plus one marker per projected pin, each popup
   // carrying label, distance, azimuth and ENU. Needs the Leaflet CDN;
   // without it (offline) the list below still carries every number.
@@ -1570,16 +2342,27 @@
       return;
     }
     const cam = currentManual() || (gps ? { lat: gps.lat, lon: gps.lon } : null) || (lastRaw.location || null);
-    const pins = boxes.filter((b) => b.geo).map((b) => ({ b, p: pinOf(b) })).filter((x) => x.p);
-    if (!cam && !pins.length) {
+    const pins = boxes.filter((b) => b.geo).map((b) => ({ b, p: effPin(b) })).filter((x) => x.p);
+    if (!cam && !pins.length && !osmData) {
       mapNote.textContent = "No pins yet — they arrive with the next Send.";
       return;
     }
     if (!map) {
-      map = window.L.map("map");
-      window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 19, attribution: "&copy; OpenStreetMap contributors"
-      }).addTo(map);
+      map = window.L.map("map", { maxZoom: 22 });
+      const base = {
+        "Streets": window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          maxZoom: 22, maxNativeZoom: 19, attribution: "&copy; OpenStreetMap contributors"
+        }),
+        "Aerial (Esri)": window.L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+          maxZoom: 22, maxNativeZoom: 19, attribution: "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics"
+        }),
+        "B&W (Stamen)": window.L.tileLayer("https://tiles.stadiamaps.com/tiles/stamen_toner/{z}/{x}/{y}{r}.png", {
+          maxZoom: 22, maxNativeZoom: 20, attribution: "&copy; Stadia Maps &copy; Stamen Design &copy; OpenMapTiles &copy; OpenStreetMap contributors"
+        }),
+      };
+      base["Streets"].addTo(map);
+      window.L.control.layers(base).addTo(map);
+      map.on("click", measureClick);
     }
     if (mapLayers) mapLayers.remove();
     mapLayers = window.L.layerGroup().addTo(map);
@@ -1592,21 +2375,47 @@
         manualLat.value = p.lat.toFixed(6);
         manualLon.value = p.lng.toFixed(6);
         mapNote.textContent = `Camera moved to ${p.lat.toFixed(6)}, ${p.lng.toFixed(6)} (manual override) — Send or Re-project to apply.`;
+        refreshLocState();
       });
       bounds.push([cam.lat, cam.lon]);
     }
     pins.forEach(({ b, p }) => {
       const g = b.geo;
+      const col = `hsl(${(boxes.indexOf(b) * 67) % 360} 90% 35%)`;
       const enu = g.enu_m ? `<br>x ${g.enu_m.x} m E, y ${g.enu_m.y} m N, z ${g.enu_m.z} m` : "";
       const snap = b.snapped ? "<br>on building outline" : "";
-      window.L.marker([p.lat, p.lon]).addTo(mapLayers).bindPopup(
-        `<b>${b.label}</b><br>${g.distance_m.toFixed(1)} m @ ${g.bearing_deg.toFixed(1)}°${enu}${snap}`);
-      bounds.push([p.lat, p.lon]);
+      const osm = b.osm ? `<br>OSM: ${osmDescribe(b.osm.tags)} (${b.osm.dist.toFixed(1)} m)` : "";
+      const path = b.pathSnapInfo ? `<br>snapped to path (${b.pathSnapInfo.dist.toFixed(1)} m)` : "";
+      const ends = b.geom === "line" ? effEnds(b) : null;
+      if (ends) {
+        window.L.polyline([[ends[0].lat, ends[0].lon], [ends[1].lat, ends[1].lon]],
+          { color: col, weight: 4 }).addTo(mapLayers).bindPopup(
+          `<b>${b.label}</b> (line)<br>${g.distance_m.toFixed(1)} m @ ${g.bearing_deg.toFixed(1)}°${enu}${snap}${osm}${path}`);
+        bounds.push([ends[0].lat, ends[0].lon], [ends[1].lat, ends[1].lon]);
+      } else {
+        window.L.marker([p.lat, p.lon]).addTo(mapLayers).bindPopup(
+          `<b>${b.label}</b><br>${g.distance_m.toFixed(1)} m @ ${g.bearing_deg.toFixed(1)}°${enu}${snap}${osm}${path}`);
+        bounds.push([p.lat, p.lon]);
+      }
+      if (p.kind === "path") {
+        // Dashed connector: original projection → snapped position.
+        const orig = pinOf(b);
+        if (orig && (orig.lat !== p.lat || orig.lon !== p.lon)) {
+          window.L.polyline([[orig.lat, orig.lon], [p.lat, p.lon]],
+            { color: "#64748b", weight: 1, dashArray: "4 4", interactive: false }).addTo(mapLayers);
+        }
+      }
     });
     if (bounds.length > 1) map.fitBounds(bounds, { padding: [20, 20] });
-    else map.setView(bounds[0], 18);
+    else if (bounds.length) map.setView(bounds[0], 18);
+    else if (osmData && (osmData.points.length || osmData.lines.length)) {
+      const first = osmData.points[0] || { lat: osmData.lines[0].pts[0][1], lon: osmData.lines[0].pts[0][0] };
+      map.setView([first.lat, first.lon], 18);
+    }
+    drawOsm();
     mapNote.textContent = `${pins.length} pin(s)` +
-      (pins.some(({ b }) => b.snapped) ? " (door/window snapped to building outline)." : ".");
+      (pins.some(({ b }) => b.snapped) ? " (door/window snapped to building outline)" : "") +
+      (osmData ? ` + ${osmData.points.length + osmData.lines.length} OSM features` : "") + ".";
   }
 
   if ("serviceWorker" in navigator) {

@@ -2,6 +2,73 @@
 
 ### Reconstruction and viewer update
 
+Version **0.23** adds a fourth workflow, **Photo + video → DA3 cloud**
+(the mode picker now offers single photo, photo-set points, photo-set
+3D, and photo + video). Upload a zip with ONE photo (EXIF GPS + heading
+locates the start) and a short video: the server samples frames, runs
+Depth Anything 3 (`DA3NESTED-GIANT-LARGE-1.1`, metric metres) to build
+a point cloud, tags points with the same concept detectors (SAM 3 /
+CLIP / Meta SAM 3.1 per frame), and projects per-label features onto
+the map — centroid pins, or PCA-endpoint lines for `|line` labels —
+with optional OSM building-outline snap. Assumes the video starts
+where the photo was taken, looking the same way. Real inference needs
+a CUDA GPU (weights ~6.8 GB, CC BY-NC 4.0; downloaded once into the
+/hf-cache volume). Docker installs `depth-anything-3` at build time
+(verified live on an RTX 4080); elsewhere use `pip install
+git+https://github.com/ByteDance-Seed/depth-anything-3.git addict`, or
+`MOCK_DA3=1` for an offline synthetic pass.
+Existing routes are untouched; the cloud renders in the shared SfM
+viewer stack.
+
+Version **0.22** declutters the console strip: detector + depth setup
+moves to a one-time **Config** dialog, location & heading to a popup on
+the Photo card (only needed without EXIF), Send to SAM sits with the
+Objects card, and the two download buttons shrink to one **Export**
+menu. Prompts take `|line` (`steps |line`) to draw a feature as a map
+polyline instead of a point pin. A new **Map match** card uploads an
+OSM-area GeoJSON, marks its points of interest on the map, matches each
+detection to nearby same-kind features (known entrances included), and
+offers **Snap to path**, which moves pins onto the nearest OSM
+path/road within tolerance — matching, map, and exports all use the
+moved positions. The map gains Esri aerial + Stamen B&W base layers
+(layer switcher, top right), zoom to 22, a metre measure tool with 5 m
+ticks, and hover readouts (class over the photo, metres over depth).
+(Stamen tiles come from Stadia Maps; heavy use needs a free API key.)
+YOLO26-depth is now bundled in Docker (weights baked in, no download).
+
+Version **0.21** turns single-photo mode into a fixed console: the five
+workflow cards sit in a top strip (~1/4 of the height) while photo +
+depth (left) and the map (right) fill the stage below (~3/4), with no
+page scrolling on desktop — narrow screens keep the stacked layout.
+Picking a new photo now clears the previous photo's manual location
+override, so a drag-correction can no longer hijack the new photo's
+EXIF on Send or Re-project.
+
+Version **0.20** turns Expand viewer into a YouTube-style theatre mode:
+the stage widens toward full viewport width but stays in the page flow,
+so the page scrolls normally instead of a fullscreen takeover.
+
+Version **0.19** caps the SAM labels list at a scrollable box so a long
+detection list no longer pushes the 3D view down the page.
+
+Version **0.18** moves the Display, minimap / telemetry, and icon toolbar
+out of the 3D viewport into a static side console beside it (stacked
+below it on narrow screens), so nothing covers the point cloud. The
+blueprint styling is unchanged; the empty-state note now centres on the
+viewport itself.
+
+Version **0.17** restyles the app with a "spatial computing / blueprint"
+aesthetic (dark default): navy grid backdrop, glass HUD panels with
+corner brackets, Space Grotesk/Mono type, floating display + minimap /
+telemetry panels over a full-bleed 3D viewport, bottom-centre icon
+toolbar driving the existing viewer actions, and a segmented progress
+bar. Functionality is unchanged; the light theme stays available via
+the header toggle.
+
+Version **0.16** restyles the UI (app bar, theme-token surfaces) and adds
+a light/dark mode toggle in the header, persisted in `localStorage`
+(`mg.theme`), defaulting to the OS scheme.
+
 Version **0.15** replaces the previous viewer with a port of the main
 viewer in `E:\Data\Agents\Codex_workspace\SLAM\SLAM-image-1`.
 `view-navigation.js`, `view-roll.js`, `point-identify.js`,
@@ -45,9 +112,12 @@ This is box-based point labelling; pixel masks and occlusion-aware semantic
 fusion are not implemented. Server SAM remains available separately and
 `MOCK_SAM=1` produces demo boxes, identified in reconstruction notes.
 
-The monocular routes still use `LiheYoung/depth-anything-small-hf`, not
-Depth Anything V3. Their displayed metres are heuristic estimates, not
-metric calibration. These changes do not replace the depth model.
+The monocular routes default to `LiheYoung/depth-anything-small-hf`
+(Depth Anything **V1** Small), not Depth Anything V3. Their displayed
+metres are heuristic estimates, not metric calibration. A metric
+alternative exists — YOLO26-depth (`yolo26n-depth.pt`, needs
+`pip install "ultralytics>=8.4.104"`) — selected per request with
+`depth_backend=yolo` or server-wide with `DEPTH_BACKEND=yolo`.
 
 Rebuild/restart Docker with `docker compose up --build -d` to use the changes.
 Real photo reconstruction and a live Meta request need validation on the
@@ -140,14 +210,19 @@ location for robot delivery-point microgeography:
    ignored) is used (`heading_source` is `manual`, `exif`, or `none`).
    Each box gets a true bearing via a pinhole camera model
    (`pixel_to_bearing`, default 60° HFOV, adjustable).
-3. **Monocular depth.** `backend/depth.py` runs Depth Anything Small
-   (`LiheYoung/depth-anything-small-hf`, ~100 MB first download) to get
-   relative depth; the median over each box is mapped linearly to
-   metres (`relative_to_metric`, far end = `max_range`, default 30 m).
-   Single-image depth is scale-ambiguous, so treat pins as approximate.
+3. **Monocular depth.** `backend/depth.py` runs Depth Anything V1
+   Small (`LiheYoung/depth-anything-small-hf`, ~100 MB first download)
+   to get relative depth; the median over each box is mapped linearly
+   to metres (`relative_to_metric`, far end = `max_range`, default
+   30 m). Single-image depth is scale-ambiguous, so treat pins as
+   approximate. The alternative YOLO26-depth backend (`yolo26n-depth.pt`)
+   predicts metric metres directly, so the box median is used as the
+   range with `max_range` acting only as a ceiling; each `geo` carries
+   `range_source` (`"relative"` | `"metric"`) so you can tell which.
    Every reply also carries `depth_png`: the depth map colorized
    turbo-style (blue far → red near, like Depth Anything V3 outdoor
-   visualizations), shown under Results.
+   visualizations), shown under Results, plus `depth_backend` /
+   `depth_model` naming what produced it.
 4. **Projection.** Bearing + range from the camera fix gives an approx
    3D point per box: lat/lon (`destination_point` haversine) plus
    `enu_m` metres east/north/up from the camera (level-camera
@@ -162,14 +237,15 @@ or OSM lookup yields partial geo, never a 500):
 
 | endpoint       | input | output |
 |----------------|-------|--------|
-| `/api/detect`  | `image`, `concepts`, `lat`, `lon`, `heading`, `hfov`, `max_range`, `project` | boxes + `geo`/`snapped` per detection, `location`, `gps_source` |
+| `/api/detect`  | `image`, `concepts`, `lat`, `lon`, `heading`, `hfov`, `max_range`, `project`, `depth_backend`, `model` | boxes + `geo`/`snapped` per detection, `location`, `gps_source` |
 | `/api/project` | `image`, `boxes` (Meta SAM-3.1 xyxy JSON), same geo fields | projected detections (used by the page for Meta-direct boxes) |
-| `/api/depth`   | `image` | 80×60 relative-depth grid (0 = far, 1 = near) + `exif_gps` |
+| `/api/depth`   | `image`, `depth_backend`, `model` | 80×60 relative-depth grid (0 = far, 1 = near) + `exif_gps` (+ `metric_grid` on the YOLO backend) |
 
 Pure geometry/EXIF helpers have unit tests with no model or network:
 
 ```sh
 .venv/bin/python backend/test_geo.py             # pure geometry/EXIF, no deps beyond Pillow
+.venv/bin/python backend/test_yolo_depth.py       # depth-backend routing + metric pipeline (mock weights)
 .venv/bin/python backend/test_merge.py           # IoU dedupe, crop similarity, clustering
 .venv/bin/python backend/test_clip.py            # proposals, CLIP pick top-k/NMS (injected scorer)
 .venv/bin/python backend/test_e2e_mock.py        # full HTTP loop, mock SAM + mock depth
