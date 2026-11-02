@@ -34,7 +34,7 @@ Object.assign(context,load('../view-navigation.js',['createViewNavigation']));
 Object.assign(context,load('../view-roll.js',['createViewRoll']));
 Object.assign(context,load('../point-identify.js',['attachPointIdentify']));
 Object.assign(context,load('../viewer-annotations.js',['createIdentifyTooltip']));
-const {createViewer}=load('../slam-viewer.js',['createViewer']);
+const {createViewer,createCameraOverlay}=load('../slam-viewer.js',['createViewer','createCameraOverlay']);
 const host=new Element(),viewer=createViewer(host);
 const positions=new Float32Array([-3,-2,0,3,2,4,0,0,2]);
 const rgb=new Float32Array(positions.length).fill(.7);
@@ -67,5 +67,29 @@ assert.equal(renderedScene.children[0].material.size,4);
 assert.equal(renderedScene.children[0].material.sizeAttenuation,false);
 viewer.setCloud(positions,rgb,rgb);tick();
 assert.equal(host.children.filter(x=>x.className.startsWith('view-navigation-edge')).length,2,'No duplicate controls on new cloud');
+const basis=new Three.Quaternion().setFromAxisAngle(new Three.Vector3(0,0,1),Math.PI/2);
+viewer.setCloud(positions,rgb,rgb,[],[],[{qvec:[basis.w,basis.x,basis.y,basis.z],tvec:[0,0,0]}]);tick();
+const inverse=basis.clone().invert();
+assert.ok(renderedCamera.up.distanceTo(new Three.Vector3(0,-1,0).applyQuaternion(inverse))<1e-7);
+assert.ok(renderedCamera.position.distanceTo(center.clone().add(new Three.Vector3(span*.45,-span*.35,-span*.65).applyQuaternion(inverse)))<1e-7);
+viewer.fitBounds();tick();
+assert.ok(renderedCamera.up.distanceTo(new Three.Vector3(0,-1,0).applyQuaternion(inverse))<1e-7);
+const overlayCameras=[
+  {qvec:[1,0,0,0],tvec:[0,0,0],model:'PINHOLE',params:[4,4,2,1],width:5,height:3},
+  {qvec:[1,0,0,0],tvec:[-1,0,0],model:'PINHOLE',params:[4,4,2,1],width:5,height:3}
+];
+const overlay=createCameraOverlay(overlayCameras,.5);
+assert.equal(overlay.name,'camera-overlays');
+assert.equal(overlay.children.length,1);
+assert.ok(overlay.children[0].isLineSegments,'Cameras must be wireframes, never opaque boxes');
+const pathPositions=overlay.children[0].geometry.attributes.position;
+assert.equal(pathPositions.count,34,'Eight frustum edges per camera plus one trajectory segment');
+assert.deepEqual([pathPositions.getX(32),pathPositions.getY(32),pathPositions.getZ(32)],[0,0,0]);
+assert.deepEqual([pathPositions.getX(33),pathPositions.getY(33),pathPositions.getZ(33)],[1,0,0]);
+viewer.setCloud(positions,rgb,rgb,[],[],overlayCameras);tick();
+viewer.setCamerasVisible(false);
+assert.equal(renderedScene.getObjectByName('camera-overlays').visible,false);
+viewer.setCamerasVisible(true);
+assert.equal(renderedScene.getObjectByName('camera-overlays').visible,true);
 viewer.dispose();assert.equal(host.children.length,0);assert.equal(nextFrame,null);
 export const navigationChecksPassed=true;

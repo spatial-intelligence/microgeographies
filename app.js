@@ -1705,6 +1705,13 @@
     const fd = new FormData();
     fd.append("zipfile", zf);
     fd.append("concepts", JSON.stringify(parsed.map((p) => p.name)));
+    fd.append("max_frames", $("videoMaxFrames").value || "16");
+    fd.append("max_points", $("videoMaxPoints").value || "1000000");
+    fd.append("sample_fps", $("videoSampleFps").value || "10");
+    fd.append("resolution", $("videoResolution").value || "low");
+    fd.append("consistency", $("videoConsistency").checked ? "1" : "0");
+    fd.append("filter_black", $("videoFilterBlack").checked ? "1" : "0");
+    fd.append("skip_titles", $("videoSkipTitles").checked ? "1" : "0");
     geomsField(fd, geomsMap(parsed));
     fd.append("detector", videoDetector.value || "sam");
     if (videoDetector.value === "api") fd.append("sam_token", videoToken.value || "");
@@ -1752,8 +1759,12 @@
     videoViewer = videoViewer || videoLib.createViewer($("videoView"), $("videoPopup"));
     videoViewer.setCloud(cloud.positions, cloud.colors,
       videoLib.labeledColors(cloud.count, raw), labels, votes, data.cameras || []);
+    videoViewer.setCamerasVisible($("videoShowCameras").checked);
+    videoViewer.setPointSize(Number($("videoPointSize").value));
     videoViewer.fitBounds();
     $("videoEmpty").hidden = true;
+    $("videoPlyBtn").disabled = false;
+    $("videoDiagnosticsBtn").disabled = false;
     const feats = data.features || [];
     videoFeatures.innerHTML = "";
     if (!feats.length) {
@@ -1777,9 +1788,32 @@
     const nLab = labels.filter(Boolean).length;
     videoOut.textContent = `Done — ${cloud.count} point(s) from ${data.frames} frame(s)` +
       (data.mock ? " (mock DA3)" : "") +
+      (data.diagnostics?.device ? ` · ${data.diagnostics.device}` : "") +
       `, ${nLab} labelled, ${feats.length} map feature(s)` +
       (data.warnings && data.warnings.length ? `. ${data.warnings.join(" ")}` : ".");
   }
+
+  $("videoShowCameras").addEventListener("change", () => {
+    videoViewer?.setCamerasVisible($("videoShowCameras").checked);
+  });
+  $("videoPointSize").addEventListener("input", () => {
+    videoViewer?.setPointSize(Number($("videoPointSize").value));
+  });
+  function downloadVideoArtifact(text, filename, type) {
+    const url = URL.createObjectURL(new Blob([text], { type }));
+    const a = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  $("videoPlyBtn").addEventListener("click", () => {
+    if (videoData) downloadVideoArtifact(videoData.ply, "da3-cloud.ply", "text/plain");
+  });
+  $("videoDiagnosticsBtn").addEventListener("click", () => {
+    if (videoData) downloadVideoArtifact(JSON.stringify({
+      model: videoData.model, diagnostics: videoData.diagnostics,
+      cameras: videoData.cameras, warnings: videoData.warnings
+    }, null, 2), "da3-diagnostics.json", "application/json");
+  });
 
   function renderVideoMap(data) {
     const feats = data.features || [];

@@ -20,6 +20,25 @@ git+https://github.com/ByteDance-Seed/depth-anything-3.git addict`, or
 Existing routes are untouched; the cloud renders in the shared SfM
 viewer stack.
 
+DA3 defaults to a one-million-point budget, full-pixel back-projection
+and a 16-frame GPU budget, configurable in the page. Sampling targets 10 fps
+within that budget and covers the complete clip, including codecs with no
+frame count. Black title/blank frames are excluded before inference; the
+first usable scene frame is the reference. Disable title filtering for
+genuinely dark footage.
+
+Confidence filtering follows the official Space's threshold logic. Optional
+cross-view cleanup rejects unsupported depths; near-black-pixel filtering is
+separate and disabled by default. Standard/high detail mirror the Space's
+504-pixel long/short-edge resize options. Higher frame counts/resolution use
+more GPU memory. Colored wireframe cameras/path, point-size adjustment,
+PLY download and diagnostics download are available below the controls.
+
+The app reports the actual inference device/GPU name. It still has no pose
+refinement, loop closure or TSDF fusion; longer sequences need a streaming
+or SLAM pipeline. The photo supplies GPS/heading only and is not a matched
+DA3 input view. See [the DA3 comparison and fixes](DA3_REVIEW.md) for details.
+
 Version **0.22** declutters the console strip: detector + depth setup
 moves to a one-time **Config** dialog, location & heading to a popup on
 the Photo card (only needed without EXIF), Send to SAM sits with the

@@ -8,3 +8,5 @@ __pycache__/
 .git/
 .gitignore
 notes.txt
+tmp-probe/da3-review*
+tmp-probe/da3_review_*

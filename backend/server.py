@@ -982,7 +982,13 @@ async def video_cloud(
     heading: str = Form(default=""),
     prefer: str = Form(default="exif"),
     snap: str = Form(default="0"),
-    max_frames: str = Form(default="12"),
+    max_frames: str = Form(default="16"),
+    max_points: str = Form(default="1000000"),
+    sample_fps: str = Form(default="10"),
+    resolution: str = Form(default="low"),
+    consistency: str = Form(default="1"),
+    filter_black: str = Form(default="0"),
+    skip_titles: str = Form(default="1"),
 ):
     """Video workflow: photo (EXIF fix) + short video -> DA3 cloud -> map.
 
@@ -1006,9 +1012,19 @@ async def video_cloud(
     except ValueError:
         lonf = None
     try:
-        mf = max(1, min(30, int(max_frames or 12)))
+        mf = max(1, min(120, int(max_frames or 16)))
     except ValueError:
-        mf = 12
+        mf = 16
+    try:
+        point_cap = max(1000, min(2000000, int(max_points or 1000000)))
+    except ValueError:
+        point_cap = 1000000
+    try:
+        sampling_rate = float(sample_fps)
+        if not 0.1 <= sampling_rate <= 30:
+            sampling_rate = 10.
+    except ValueError:
+        sampling_rate = 10.
     data = await zipfile.read()
     if len(data) > MAX_BATCH_BYTES:
         return {"error": (f"zip too large ({len(data) / 1e6:.0f} MB, "
@@ -1031,6 +1047,9 @@ async def video_cloud(
             return {"error": "not a zip file", "warnings": warnings}
         infos = [i for i in zf.infolist()
                  if not i.is_dir() and "__MACOSX" not in i.filename]
+        if sum(i.file_size for i in infos) > MAX_BATCH_BYTES:
+            return {"error": "zip contents exceed the 200 MB extraction limit",
+                    "warnings": warnings}
         video_info = next((i for i in infos
                            if i.filename.lower()
                            .endswith(da3_mod.VIDEO_EXTS)), None)
@@ -1059,12 +1078,32 @@ async def video_cloud(
                  f"{location and (round(location['lat'], 5), round(location['lon'], 5))} "
                  f"({gps_source}); heading {heading_deg} ({heading_source})")
 
-            frames = da3_mod.extract_frames(vpath, tmp, max_frames=mf)
+            extraction = {}
+            frames = da3_mod.extract_frames(vpath, tmp, max_frames=mf,
+                                            sample_fps=sampling_rate,
+                                            skip_titles=skip_titles == "1",
+                                            diagnostics=extraction)
+            skipped = extraction.get("skipped_title_frames", [])
+            if skipped:
+                warnings.append(f"Skipped {len(skipped)} black title/blank frames before DA3 inference.")
+                emit(f"Excluded black title/blank frame indices: {skipped}")
             emit(f"Sampled {len(frames)} frame(s) from "
                  f"{video_info.filename}")
+            times = [f.get("time_s") for f in frames]
+            if times and all(t is not None for t in times):
+                emit(f"Sampled video time: {times[0]:.2f}s to {times[-1]:.2f}s")
+                if len(times) > 1 and times[-1] > times[0]:
+                    effective_fps = (len(times) - 1) / (times[-1] - times[0])
+                    emit(f"Effective sampling: {effective_fps:.2f} fps (requested {sampling_rate:g})")
+                    if effective_fps < sampling_rate * .8:
+                        warnings.append(f"Frame budget reduced sampling to {effective_fps:.2f} fps; increase frames for more overlap.")
 
-            scene = da3_mod.estimate_scene(frames)
+            emit(f"Running DA3 on {len(frames)} frames; cloud budget {point_cap} points")
+            scene = da3_mod.estimate_scene(frames, emit=emit,
+                                           resolution=resolution)
             emit(f"Depth pass done ({scene['model']})")
+            if not scene.get("mock") and not str(scene.get("device", "")).startswith("cuda"):
+                warnings.append("DA3 ran on CPU; CUDA was unavailable to the backend process.")
 
             names = [f["name"] for f in frames]
             pils = {names[i]: scene["processed"][i]
@@ -1077,14 +1116,34 @@ async def video_cloud(
                 emit(f"Tagged {sum(len(v) for v in dets.values())} box(es) "
                      f"on {len(dets)} frame(s)")
 
-            points, colors = da3_mod.build_cloud(scene)
+            diagnostics = dict(extraction)
+            points, colors = da3_mod.build_cloud(
+                scene, cap=point_cap, diagnostics=diagnostics,
+                consistency=consistency == "1", filter_black=filter_black == "1")
+            diagnostics.update(device=scene.get("device", "mock"),
+                               gpu_name=scene.get("gpu_name"),
+                               process_res_method=scene.get("process_res_method"),
+                               ref_view_strategy=scene.get("ref_view_strategy"),
+                               processed_sizes=[list(p.size) for p in scene["processed"]],
+                               sampled_frame_indices=[f.get("frame_index") for f in frames],
+                               sampled_times_s=[f.get("time_s") for f in frames],
+                               frame_limit=mf, point_limit=point_cap)
             emit(f"Point cloud: {len(points)} point(s)")
+            emit(f"Retained points per frame: {diagnostics['points_per_frame']}; "
+                 f"confidence threshold: {diagnostics['confidence_threshold']}")
+            emit(f"Cross-view cleanup removed {diagnostics['consistency_removed']} unsupported points")
+            if not points:
+                return {"error": "DA3 produced no usable non-sky geometry",
+                        "warnings": warnings, "diagnostics": diagnostics}
+            if not scene.get("is_metric"):
+                warnings.append("DA3 did not report metric scale; geographic features disabled.")
             cameras = da3_mod.da3_cameras(scene, names)
             point_labels = (sfm_mod.vote_point_labels_numpy(
                 points, cameras, dets) if dets else {})
 
             features = []
-            if location and heading_deg is not None and point_labels:
+            if (location and heading_deg is not None and point_labels
+                    and scene.get("is_metric")):
                 pts_cam = da3_mod.to_first_camera(points, scene)
                 features = da3_mod.cloud_features(
                     pts_cam, point_labels, location["lat"],
@@ -1100,7 +1159,7 @@ async def video_cloud(
                                 f["snapped"] = s
                 emit(f"{len(features)} map feature(s) from "
                      f"{sum(f['count'] for f in features)} labelled point(s)")
-            elif point_labels:
+            elif point_labels and (not location or heading_deg is None):
                 warnings.append(
                     "No photo location/heading — features carry no "
                     "lat/lon; add EXIF GPS + direction (or manual values) "
@@ -1108,8 +1167,8 @@ async def video_cloud(
 
             return {
                 "ply": sfm_mod.write_ply_ascii(points, colors),
-                "cameras": [{"image": c["image"], "width": c["width"],
-                             "height": c["height"]} for c in cameras],
+                "cameras": cameras,
+                "diagnostics": diagnostics,
                 "point_labels": {str(k): {"label": v["label"],
                                           "votes": v.get("votes", 0)}
                                  for k, v in point_labels.items()},

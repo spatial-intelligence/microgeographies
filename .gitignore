@@ -8,3 +8,5 @@ colmap.*
 .venv
 .venv-win/
 .pytest_cache/
+tmp-probe/da3-review*
+tmp-probe/da3_review_*.py

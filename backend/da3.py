@@ -27,13 +27,15 @@ all lazy imports.
 
 import math
 import os
+import threading
 
 import depth as geo
 
 DA3_MODEL_ID = os.environ.get(
     "DA3_MODEL_ID", "depth-anything/DA3NESTED-GIANT-LARGE-1.1")
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".webm")
-MAX_CLOUD_POINTS = 50000
+MAX_CLOUD_POINTS = 1000000
+_inference_lock = threading.Lock()
 
 _da3_model = None  # lazy DepthAnything3 instance
 _da3_model_id = None
@@ -79,13 +81,31 @@ def sample_frame_indices(total, max_frames):
     total, max_frames = int(total), max(1, int(max_frames))
     if total <= 0:
         return []
+    if max_frames == 1:
+        return [0]
     if total <= max_frames:
         return list(range(total))
     step = (total - 1) / (max_frames - 1)
     return sorted({round(i * step) for i in range(max_frames)})
 
 
-def extract_frames(video_path, out_dir, max_frames=12, max_dim=1024):
+def is_black_title_frame(frame):
+    """Conservative black end-card/blank-frame heuristic, before inference.
+
+    Both a mostly black image and almost entirely black outer border are
+    required. Exposed in the UI because genuine night scenes may match.
+    """
+    import numpy as np
+    dark = (np.asarray(frame)[..., :3] < 16).all(axis=-1)
+    h, w = dark.shape
+    edge = max(1, min(h, w) // 20)
+    border = np.concatenate([dark[:edge].ravel(), dark[-edge:].ravel(),
+                             dark[:, :edge].ravel(), dark[:, -edge:].ravel()])
+    return bool(dark.mean() >= .85 and border.mean() >= .98)
+
+
+def extract_frames(video_path, out_dir, max_frames=16, max_dim=1280,
+                   sample_fps=10.0, skip_titles=True, diagnostics=None):
     """Sample frames from a video into out_dir as frame_NNN.jpg files.
 
     Returns [{"name", "path"}] in time order. Raises RuntimeError when
@@ -103,20 +123,38 @@ def extract_frames(video_path, out_dir, max_frames=12, max_dim=1024):
         raise RuntimeError(
             f"could not open video: {os.path.basename(video_path)}")
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    wanted = set(sample_frame_indices(total, max_frames)) if total > 0 else set()
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
+    if total <= 0:
+        # Some containers/codecs do not publish a frame count. Count first,
+        # then reopen: the old fallback stopped after the start of the clip.
+        total = 0
+        try:
+            while cap.read()[0]:
+                total += 1
+        finally:
+            cap.release()
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            cap.release()
+            raise RuntimeError("could not reopen video after counting frames")
+    # Match the demo's FPS sampling, while retaining a bounded GPU batch.
+    # If the budget is exceeded, spread the budget over the WHOLE clip.
+    desired = total
+    if math.isfinite(fps) and fps > 0 and sample_fps > 0:
+        desired = min(total, max(2, math.ceil((total - 1) / fps * sample_fps) + 1))
+    wanted = set(sample_frame_indices(total, min(max_frames, desired)))
     out, idx = [], 0
+    skipped = []
     try:
-        grab_all = total <= 0
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
-            if grab_all:
-                stride_hint = max(1, max_frames)
-                if idx % stride_hint:
-                    idx += 1
-                    continue
-            elif idx not in wanted:
+            if idx not in wanted:
+                idx += 1
+                continue
+            if skip_titles and is_black_title_frame(frame):
+                skipped.append(idx)
                 idx += 1
                 continue
             h, w = frame.shape[:2]
@@ -124,18 +162,22 @@ def extract_frames(video_path, out_dir, max_frames=12, max_dim=1024):
                 k = max_dim / max(w, h)
                 frame = cv2.resize(frame, (round(w * k), round(h * k)),
                                    interpolation=cv2.INTER_AREA)
-            name = f"frame_{len(out) + 1:03d}.jpg"
+            name = f"frame_{len(out) + 1:03d}.png"
             path = os.path.join(out_dir, name)
             if not cv2.imwrite(path, frame):
                 raise RuntimeError(f"could not write frame {name}")
-            out.append({"name": name, "path": path})
+            out.append({"name": name, "path": path, "frame_index": idx,
+                        "time_s": idx / fps if math.isfinite(fps) and fps > 0 else None})
             if len(out) >= max_frames:
                 break
             idx += 1
     finally:
         cap.release()
+    if diagnostics is not None:
+        diagnostics.update(video_frames=total, video_fps=fps if math.isfinite(fps) else None,
+                           skipped_title_frames=skipped)
     if not out:
-        raise RuntimeError("no frames could be decoded from the video")
+        raise RuntimeError("no usable scene frames decoded; disable title-frame filtering if this is a very dark video")
     return out
 
 
@@ -189,10 +231,10 @@ def _mock_scene(frame_pils):
     return {"depth": depths, "conf": confs,
             "extrinsics": np.stack(exts), "intrinsics": np.stack(ints),
             "processed": list(frame_pils),
-            "model": "mock-da3", "mock": True}
+            "is_metric": True, "model": "mock-da3", "mock": True}
 
 
-def estimate_scene(frames):
+def estimate_scene(frames, emit=None, resolution="low"):
     """Run DA3 (or the mock) over extracted frames.
 
     ``frames``: [{"name", "path"}] from extract_frames. Returns
@@ -205,44 +247,99 @@ def estimate_scene(frames):
     if os.getenv("MOCK_DA3") == "1":
         from PIL import Image
         return _mock_scene([Image.open(f["path"]) for f in frames])
-    model = _load_da3()
-    pred = model.inference([f["path"] for f in frames])
+    import torch
+    method = "lower_bound_resize" if resolution == "high" else "upper_bound_resize"
+    # One model/GPU batch at a time, including lazy loading.
+    with _inference_lock:
+        model = _load_da3()
+        device = next(model.parameters()).device
+        gpu_name = torch.cuda.get_device_name(device) if device.type == "cuda" else None
+        if emit:
+            emit(f"DA3 inference device: {device}" + (f" ({gpu_name})" if gpu_name else " (CPU)"))
+            emit(f"DA3 image processing: {method}, resolution 504")
+        try:
+            pred = model.inference([f["path"] for f in frames], process_res=504,
+                                   process_res_method=method,
+                                   ref_view_strategy="first")
+        except torch.cuda.OutOfMemoryError as e:
+            torch.cuda.empty_cache()
+            raise RuntimeError("DA3 exhausted GPU memory; reduce the frame budget or use standard resolution") from e
     depth = np.asarray(pred.depth, dtype=np.float32)
-    conf = np.asarray(pred.conf, dtype=np.float32)
+    conf = (np.asarray(pred.conf, dtype=np.float32)
+            if pred.conf is not None else None)
     from PIL import Image as _Image
     processed = [_Image.fromarray(np.asarray(img, dtype=np.uint8))
                  for img in np.asarray(pred.processed_images)]
     return {"depth": [depth[i] for i in range(len(processed))],
-            "conf": [conf[i] for i in range(len(processed))],
-            "extrinsics": np.asarray(pred.extrinsics, dtype=np.float32),
+            "conf": ([conf[i] for i in range(len(processed))]
+                     if conf is not None else None),
+            "sky": getattr(pred, "sky", None),
+            "is_metric": bool(getattr(pred, "is_metric", False)),
+            "extrinsics": np.asarray(pred.extrinsics, dtype=np.float32)[..., :3, :4],
             "intrinsics": np.asarray(pred.intrinsics, dtype=np.float32),
             "processed": processed,
+            "device": str(device), "gpu_name": gpu_name,
+            "process_res_method": method,
+            "ref_view_strategy": "first",
             "model": _da3_model_id, "mock": False}
 
 
-def build_cloud(scene, conf_pct=40.0, cap=MAX_CLOUD_POINTS, stride=2):
+def build_cloud(scene, conf_pct=10.0, cap=MAX_CLOUD_POINTS, stride=1,
+                diagnostics=None, consistency=False, filter_black=False):
     """Back-project DA3 depth into world-frame points + colors.
 
     Keeps pixels with finite positive depth and confidence at or above
     the scene's `conf_pct` percentile (adaptive: DA3 confidence is not
-    0..1), samples every `stride`-th pixel, then even-stride caps the
+    0..1), excludes predicted sky, samples every `stride`-th pixel, then caps the
     total. Returns (points [[x,y,z]...], colors [[r,g,b]...]) as plain
     lists (PLY/voting friendly).
     """
     import numpy as np
+    if stride < 1:
+        raise ValueError("stride must be positive")
+    # One threshold across views: a low-confidence frame must not be
+    # guaranteed the same retained fraction as a reliable frame.
+    masks, confidence_values = [], []
+    confs, sky = scene.get("conf"), scene.get("sky")
+    for i, depth in enumerate(scene["depth"]):
+        d = np.asarray(depth)
+        valid = np.isfinite(d) & (d > 0.05)
+        if sky is not None:
+            valid &= ~np.asarray(sky[i], dtype=bool)
+        if filter_black:
+            valid &= ~((np.asarray(scene["processed"][i].convert("RGB")) < 16).all(axis=-1))
+        if confs is not None:
+            c = np.asarray(confs[i])
+            valid &= np.isfinite(c)
+            confidence_values.append(c[valid])
+        masks.append(valid)
+    values = (np.concatenate(confidence_values)
+              if confidence_values else np.array([]))
+    # Match DA3's exporter: absolute floor 1.05, clamped between the
+    # requested and 90th confidence percentiles (not a probability).
+    threshold = (float(np.clip(1.05, np.percentile(values, conf_pct),
+                               np.percentile(values, max(90., conf_pct))))
+                 if values.size else None)
+    if threshold is not None:
+        for i in range(len(masks)):
+            masks[i] &= np.asarray(confs[i]) >= threshold
     chunks = []
+    frame_counts = []
+    consistency_removed = 0
+    sampled_counts = []
     for i, proc in enumerate(scene["processed"]):
         d = np.asarray(scene["depth"][i], dtype=np.float64)
-        c = np.asarray(scene["conf"][i], dtype=np.float64)
         K = np.asarray(scene["intrinsics"][i], dtype=np.float64)
-        w2c = np.asarray(scene["extrinsics"][i], dtype=np.float64)
-        valid = np.isfinite(d) & (d > 0.05)
-        if np.isfinite(c).any():
-            m = valid & np.isfinite(c)
-            if m.any():
-                valid &= np.isfinite(c) & (c >= np.percentile(c[m], conf_pct))
+        w2c = np.asarray(scene["extrinsics"][i], dtype=np.float64)[:3, :4]
+        if proc.size != (d.shape[1], d.shape[0]):
+            raise ValueError("DA3 processed image and depth dimensions differ")
+        valid = masks[i].copy()
+        if threshold is not None:
+            valid &= np.asarray(confs[i]) >= threshold
         ys, xs = np.nonzero(valid[::stride, ::stride])
         ys, xs = ys * stride, xs * stride
+        frame_counts.append(int(len(xs)))
+        sampled_counts.append(int(len(xs)))
         if len(xs) == 0:
             continue
         z = d[ys, xs]
@@ -253,14 +350,55 @@ def build_cloud(scene, conf_pct=40.0, cap=MAX_CLOUD_POINTS, stride=2):
         cam = np.stack([xc, yc, z], axis=1)
         world = (cam - t) @ R  # == R^T (x - t), row form
         img = np.asarray(proc.convert("RGB"))
-        chunks.append((world, img[ys, xs].copy()))
+        rgb = img[ys, xs].copy()
+        if consistency and not scene.get("mock") and len(masks) > 1:
+            # Nearby views have the most overlap. Never count the source
+            # depth as independent support for its own points.
+            neighbors = sorted((j for j in range(len(masks)) if j != i),
+                               key=lambda j: abs(j - i))[:4]
+            supported = np.zeros(len(world), dtype=bool)
+            observed = np.zeros(len(world), dtype=bool)
+            for j in neighbors:
+                ext = np.asarray(scene["extrinsics"][j])[:3, :4]
+                target = world @ ext[:, :3].T + ext[:, 3]
+                kt = np.asarray(scene["intrinsics"][j])
+                proj = target @ kt.T
+                front = np.isfinite(proj).all(axis=1) & (target[:, 2] > .05)
+                u = np.zeros(len(world), dtype=np.int64)
+                v = np.zeros(len(world), dtype=np.int64)
+                h, w = masks[j].shape
+                in_frame = front.copy()
+                in_frame[front] &= ((proj[front, 0] / proj[front, 2] >= 0)
+                                    & (proj[front, 0] / proj[front, 2] < w - .5)
+                                    & (proj[front, 1] / proj[front, 2] >= 0)
+                                    & (proj[front, 1] / proj[front, 2] < h - .5))
+                u[in_frame] = np.rint(proj[in_frame, 0] / proj[in_frame, 2]).astype(np.int64)
+                v[in_frame] = np.rint(proj[in_frame, 1] / proj[in_frame, 2]).astype(np.int64)
+                idx = np.flatnonzero(in_frame)
+                idx = idx[masks[j][v[idx], u[idx]]]
+                observed[idx] = True
+                expected = np.asarray(scene["depth"][j])[v[idx], u[idx]]
+                supported[idx] |= abs(target[idx, 2] - expected) <= np.maximum(.03, expected * .03)
+            keep = supported | ~observed
+            consistency_removed += int((~keep).sum())
+            world, rgb = world[keep], rgb[keep]
+            frame_counts[-1] = int(keep.sum())
+        chunks.append((world, rgb))
+    if diagnostics is not None:
+        diagnostics.update(confidence_threshold=threshold,
+                           points_per_frame=frame_counts,
+                           sampled_points_per_frame=sampled_counts,
+                           consistency_removed=consistency_removed,
+                           consistency_enabled=bool(consistency and not scene.get("mock")),
+                           points_before_cap=sum(frame_counts))
     if not chunks:
         return [], []
     points = np.concatenate([c[0] for c in chunks])
     colors = np.concatenate([c[1] for c in chunks])
     if cap and len(points) > cap:
-        k = math.ceil(len(points) / cap)
-        points, colors = points[::k], colors[::k]
+        # Random sampling avoids scanline aliasing from another regular stride.
+        idx = np.sort(np.random.default_rng(0).choice(len(points), cap, replace=False))
+        points, colors = points[idx], colors[idx]
     return ([[round(float(x), 3) for x in p] for p in points],
             [[int(v) for v in c] for c in colors])
 
@@ -271,7 +409,7 @@ def da3_cameras(scene, names):
     for i, proc in enumerate(scene["processed"]):
         w, h = proc.size
         K = scene["intrinsics"][i]
-        w2c = scene["extrinsics"][i]
+        w2c = scene["extrinsics"][i][:3, :4]
         R = [[float(v) for v in row[:3]] for row in w2c]
         t = [float(w2c[r][3]) for r in range(3)]
         cams.append({
@@ -292,7 +430,7 @@ def to_first_camera(points, scene):
     import numpy as np
     if not points:
         return []
-    w2c = scene["extrinsics"][0]
+    w2c = scene["extrinsics"][0][:3, :4]
     R = np.asarray(w2c[:, :3], dtype=np.float64)
     t = np.asarray(w2c[:, 3], dtype=np.float64)
     pts = np.asarray(points, dtype=np.float64)
