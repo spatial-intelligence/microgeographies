@@ -234,7 +234,7 @@ def _mock_scene(frame_pils):
             "is_metric": True, "model": "mock-da3", "mock": True}
 
 
-def estimate_scene(frames, emit=None, resolution="low"):
+def estimate_scene(frames, emit=None, resolution="low", infer_gs=False):
     """Run DA3 (or the mock) over extracted frames.
 
     ``frames``: [{"name", "path"}] from extract_frames. Returns
@@ -246,7 +246,13 @@ def estimate_scene(frames, emit=None, resolution="low"):
     import numpy as np
     if os.getenv("MOCK_DA3") == "1":
         from PIL import Image
-        return _mock_scene([Image.open(f["path"]) for f in frames])
+        scene = _mock_scene([Image.open(f["path"]) for f in frames])
+        if infer_gs:
+            points, colors = build_cloud(scene, cap=30000)
+            scene["gaussians"] = {"means": points, "colors": [[v/255 for v in c] for c in colors],
+                                  "scales": [[.025]*3 for _ in points], "rotations": [[1, 0, 0, 0] for _ in points],
+                                  "opacities": [.8]*len(points), "mock": True}
+        return scene
     import torch
     method = "lower_bound_resize" if resolution == "high" else "upper_bound_resize"
     # One model/GPU batch at a time, including lazy loading.
@@ -258,9 +264,10 @@ def estimate_scene(frames, emit=None, resolution="low"):
             emit(f"DA3 inference device: {device}" + (f" ({gpu_name})" if gpu_name else " (CPU)"))
             emit(f"DA3 image processing: {method}, resolution 504")
         try:
+            kwargs = {"infer_gs": True} if infer_gs else {}
             pred = model.inference([f["path"] for f in frames], process_res=504,
                                    process_res_method=method,
-                                   ref_view_strategy="first")
+                                   ref_view_strategy="first", **kwargs)
         except torch.cuda.OutOfMemoryError as e:
             torch.cuda.empty_cache()
             raise RuntimeError("DA3 exhausted GPU memory; reduce the frame budget or use standard resolution") from e
@@ -270,7 +277,11 @@ def estimate_scene(frames, emit=None, resolution="low"):
     from PIL import Image as _Image
     processed = [_Image.fromarray(np.asarray(img, dtype=np.uint8))
                  for img in np.asarray(pred.processed_images)]
+    gaussian_data = serialize_gaussians(getattr(pred, "gaussians", None)) if infer_gs else None
+    if infer_gs and not gaussian_data:
+        raise RuntimeError("This DA3 installation did not return Gaussian parameters. Update depth-anything-3 with Gaussian support, or choose Point cloud.")
     return {"depth": [depth[i] for i in range(len(processed))],
+            "gaussians": gaussian_data,
             "conf": ([conf[i] for i in range(len(processed))]
                      if conf is not None else None),
             "sky": getattr(pred, "sky", None),
@@ -282,6 +293,34 @@ def estimate_scene(frames, emit=None, resolution="low"):
             "process_res_method": method,
             "ref_view_strategy": "first",
             "model": _da3_model_id, "mock": False}
+
+
+def serialize_gaussians(gaussians, cap=100000):
+    """Bounded real DA3 Gaussian parameters; DC colours for the web preview."""
+    import numpy as np
+    if gaussians is None:
+        return None
+    def array(value):
+        return np.asarray(value.detach().float().cpu() if hasattr(value, "detach") else value, dtype=np.float32)
+    means = array(gaussians.means).reshape(-1, 3)
+    if not len(means):
+        return None
+    scales = array(gaussians.scales).reshape(-1, 3)
+    rotations = array(gaussians.rotations).reshape(-1, 4)
+    harmonics = array(gaussians.harmonics).reshape(len(means), 3, -1)
+    opacities = array(gaussians.opacities).reshape(len(means), -1)[:, 0]
+    mask = (np.isfinite(means).all(1) & np.isfinite(scales).all(1) & (scales > 0).all(1)
+            & np.isfinite(rotations).all(1) & (np.linalg.norm(rotations, axis=1) > 1e-8)
+            & np.isfinite(harmonics).all((1, 2)) & np.isfinite(opacities) & (opacities > .01))
+    idx = np.flatnonzero(mask)
+    idx = idx[::max(1, math.ceil(len(idx)/cap))]
+    if not len(idx):
+        return None
+    return {"means": means[idx].tolist(), "scales": scales[idx].tolist(),
+            "rotations": rotations[idx].tolist(),
+            "colors": np.clip(.5 + .28209479177387814*harmonics[idx, :, 0], 0, 1).tolist(),
+            "opacities": np.clip(opacities[idx], 0, .999).tolist(),
+            "color_basis": "SH DC", "total": int(mask.sum())}
 
 
 def build_cloud(scene, conf_pct=10.0, cap=MAX_CLOUD_POINTS, stride=1,

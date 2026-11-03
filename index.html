@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>MicroGeo Capture Tool v0.23</title>
-  <meta name="description" content="Test page: upload a photo, send it to SAM 3.1 with object prompts, get bounding boxes back with GPS.">
+  <title>MicroGeo Tool v0.26</title>
+  <meta name="description" content="Turn photos and video into mapped features and 3D point clouds. Choose a MicroGeo workflow to get started.">
   <meta name="theme-color" content="#050816" id="themeColorMeta">
   <script>
   // Early theme: set html[data-theme] before CSS paints to avoid a flash.
@@ -25,7 +25,7 @@
   <link rel="apple-touch-icon" href="icon.svg">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="viewer-navigation.css">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="vendor/leaflet.css">
   <script type="importmap">
   {
     "imports": {
@@ -38,11 +38,11 @@
   <header class="appbar">
     <div class="appbar-row">
       <div>
-        <h1>MicroGeo Capture Tool <span class="ver">v0.23</span></h1>
-        <p class="tagline">Collect delivery-point microgeography: photo → depth → map pin.</p>
+        <h1>MicroGeo Tool <span class="ver">v0.26</span></h1>
       </div>
       <div class="appbar-actions">
-        <p class="secure-pill" id="secureNote"></p>
+        <a href="./" id="homeLink" class="title-link">Home</a>
+        <button type="button" id="settingsBtn" class="title-link">Settings</button>
         <button type="button" id="themeBtn" class="theme-btn" aria-label="Toggle light and dark mode">
           <svg class="sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"/></svg>
           <svg class="moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M13.5 9.5A5.7 5.7 0 0 1 6.5 2.5a5.7 5.7 0 1 0 7 7Z"/></svg>
@@ -53,7 +53,68 @@
   </header>
 
   <main>
-    <section class="card" id="modeCard">
+    <section class="card landing-card" id="landing" aria-labelledby="landingTitle">
+      <h2 class="landing-eyebrow" id="landingTitle">PHOTO · DEPTH · GEOGRAPHY</h2>
+      <div class="donut-wrap">
+        <svg class="donut" viewBox="0 0 320 320" role="group" aria-label="Workflow picker">
+          <defs>
+            <linearGradient id="donutBlue" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#153e6b"/>
+              <stop offset="100%" stop-color="#0b2546"/>
+            </linearGradient>
+          </defs>
+          <g class="donut-guides" aria-hidden="true">
+            <circle cx="160" cy="160" r="153"/>
+            <circle cx="160" cy="160" r="69"/>
+            <path d="M160 3v9m0 296v9M3 160h9m296 0h9"/>
+          </g>
+          <g class="donut-quad quad-single" data-workflow="single" tabindex="0" role="button" aria-label="Single photo: detect objects, monocular depth, map pin">
+            <path d="M 167.3 20.2 A 140 140 0 0 1 299.8 152.7 L 237.9 155.9 A 78 78 0 0 0 164.1 82.1 Z"></path>
+            <text x="237" y="76" text-anchor="middle"><tspan x="237" dy="0">SINGLE</tspan><tspan x="237" dy="1.3em">PHOTO</tspan></text>
+          </g>
+          <g class="donut-quad quad-pins" data-workflow="set-depth" tabindex="0" role="button" aria-label="Photo set to pins: zip in, depth plus merged map pins">
+            <path d="M 299.8 167.3 A 140 140 0 0 1 167.3 299.8 L 164.1 237.9 A 78 78 0 0 0 237.9 164.1 Z"></path>
+            <text x="237" y="231" text-anchor="middle"><tspan x="237" dy="0">SET →</tspan><tspan x="237" dy="1.3em">PINS</tspan></text>
+          </g>
+          <g class="donut-quad quad-3d" data-workflow="set-3d" tabindex="0" role="button" aria-label="Photo set to 3D: zip in, COLMAP cloud with labels">
+            <path d="M 152.7 299.8 A 140 140 0 0 1 20.2 167.3 L 82.1 164.1 A 78 78 0 0 0 155.9 237.9 Z"></path>
+            <text x="83" y="231" text-anchor="middle"><tspan x="83" dy="0">SET →</tspan><tspan x="83" dy="1.3em">3D</tspan></text>
+          </g>
+          <g class="donut-quad quad-video" data-workflow="set-video" tabindex="0" role="button" aria-label="Photo plus video to DA3 cloud: tagged features, map pins">
+            <path d="M 20.2 152.7 A 140 140 0 0 1 152.7 20.2 L 155.9 82.1 A 78 78 0 0 0 82.1 155.9 Z"></path>
+            <text x="83" y="76" text-anchor="middle"><tspan x="83" dy="0">PHOTO +</tspan><tspan x="83" dy="1.3em">VIDEO</tspan></text>
+          </g>
+          <g class="donut-hub" aria-hidden="true">
+            <path d="M160 126l12 7v14l-12 7-12-7v-14Zm-12 7 12 7 12-7m-12 7v14"/>
+            <text x="160" y="175" text-anchor="middle">MicroGeo</text>
+            <text class="donut-hub-caption" x="160" y="190" text-anchor="middle">CHOOSE A WORKFLOW</text>
+          </g>
+        </svg>
+      </div>
+      <p class="landing-helper">Select a segment above, or explore the workflows below</p>
+      <ul class="landing-list" aria-label="Available workflows">
+        <li><button type="button" data-workflow="single"><b>Single photo</b><span>Identify objects, estimate depth and place features on the map.</span></button></li>
+        <li><button type="button" data-workflow="set-depth"><b>Photo set → pins</b><span>Combine a collection of photos into merged map features.</span></button></li>
+        <li><button type="button" data-workflow="set-3d"><b>Photo set → 3D</b><span>Reconstruct a 3D point cloud from overlapping photos.</span></button></li>
+        <li><button type="button" data-workflow="set-video"><b>Photo + video → DA3 cloud</b><span>Build a point cloud and map tagged features from a video.</span></button></li>
+      </ul>
+    </section>
+
+    <nav class="card workflow-nav" id="workflowNav" hidden aria-label="Workflow">
+      <button type="button" id="backBtn" class="back-btn">← All workflows</button>
+      <div class="workflow-head">
+        <h2 id="workflowTitle">Single photo</h2>
+        <p class="hint" id="workflowBlurb"></p>
+      </div>
+      <div class="workflow-switch" role="group" aria-label="Switch workflow">
+        <button type="button" data-workflow="single">Single photo</button>
+        <button type="button" data-workflow="set-depth">Set → pins</button>
+        <button type="button" data-workflow="set-3d">Set → 3D</button>
+        <button type="button" data-workflow="set-video">Photo + video</button>
+      </div>
+    </nav>
+
+    <section class="card" id="modeCard" hidden>
       <h2>What are you processing?</h2>
       <label class="row"><input type="radio" name="mode" value="single" checked> <span><b>Single photo</b> — detect objects, monocular depth, map pin.</span></label>
       <label class="row"><input type="radio" name="mode" value="set-depth"> <span><b>Photo set → pins</b> — zip in, depth + merged map pins per photo.</span></label>
@@ -64,11 +125,11 @@
 
     <section class="card" id="secPhoto" data-title="Photo">
       <h2>1. Photo</h2>
-      <input type="file" id="fileInput" accept="image/*" capture="environment">
-      <p class="hint">On a phone this opens the camera. GPS is read at send time so the photo location can be mapped later.</p>
+      <input type="file" id="fileInput" accept="image/*">
+      <p class="hint">Upload a photo. Its EXIF location and direction are used for mapping.</p>
       <p id="exifOut">No photo yet.</p>
       <button type="button" id="locBtn">Location &amp; heading…</button>
-      <p class="hint" id="locState">Location: photo EXIF when present, else live fix.</p>
+      <p class="hint" id="locState">Location: photo EXIF, or enter a correction.</p>
     </section>
 
     <section class="card" id="secObjects" data-title="Objects to find">
@@ -84,7 +145,7 @@
     <section class="card" id="secDetector" data-title="Detector">
       <h2>3. Detector</h2>
       <p class="hint" id="detectorSummary">API SAM 3.1</p>
-      <button type="button" id="cfgBtn">Config…</button>
+      <button type="button" id="cfgBtn">Settings…</button>
     </section>
 
     <section class="card" id="secResults" data-title="Results">
@@ -94,13 +155,6 @@
         <summary>Raw JSON</summary>
         <pre id="rawOut">{}</pre>
       </details>
-      <div class="export-wrap">
-        <button type="button" id="exportBtn" disabled>Export ▾</button>
-        <div class="export-menu" id="exportMenu" hidden>
-          <button type="button" id="exportGeoBtn">GeoJSON map pins</button>
-          <button type="button" id="exportPngBtn">Annotated PNG</button>
-        </div>
-      </div>
       <button type="button" id="reprojectBtn" disabled>Re-project (no SAM)</button>
       <p class="hint">Re-project reuses the last SAM boxes with the current heading / field-of-view / range — no new SAM call, so you can iterate the geometry fast.</p>
     </section>
@@ -131,7 +185,7 @@
       </div>
       <div class="console-right">
         <figure class="console-pane">
-          <figcaption>Map <button type="button" id="measureBtn" class="mini-btn" aria-pressed="false" title="Measure distances in metres">Measure</button> <span class="hint" id="mapNote">No pins yet — they arrive with the next Send.</span></figcaption>
+          <figcaption>Map <button type="button" id="measureBtn" class="mini-btn" aria-pressed="false" title="Measure distances in metres">Measure</button> <button type="button" class="mini-btn" data-expand-map="map">Expand map</button> <span class="hint" id="mapNote">Upload a photo to map its features.</span></figcaption>
           <div id="map"></div>
         </figure>
       </div>
@@ -144,7 +198,8 @@
         Drop a <b>.zip</b> of photos here, or click to pick one.
       </div>
       <input type="file" id="zipInput" accept=".zip,application/zip">
-      <p class="hint">Up to 20 photos. For 3D, use overlapping views taken from different positions; GPS is optional. For map pins, photos need GPS and a heading (EXIF or a fallback set in single-photo mode).</p>
+      <label class="row" id="setSamToggle"><input type="checkbox" id="sfmUseSam"> Use SAM / object labelling after reconstruction</label>
+      <p class="hint">Up to 20 photos. For 3D, use overlapping views taken from different positions; GPS is optional for a local cloud; map alignment needs at least three registered photos with distinct, non-collinear GPS positions. For map pins, photos need GPS and a heading (EXIF or a fallback set in single-photo mode).</p>
       <label>Concepts to find (comma separated)
         <input type="text" id="setConcepts" value="door, steps" autocomplete="off">
       </label>
@@ -155,7 +210,7 @@
           <option value="clip">Local CLIP windows (coarse boxes, offline after download)</option>
         </select>
       </label>
-      <label id="setTokenLabel">Meta API token
+      <label id="setTokenLabel" hidden>Meta API token
         <input type="password" id="setApiToken" autocomplete="off" placeholder="Your Meta API key">
         <span class="hint">Used for this ZIP request via your backend. Also shared with the single-photo token setting.</span>
       </label>
@@ -176,42 +231,44 @@
       <div id="batchGrid" class="batch-grid"></div>
       <h3>Merged features</h3>
       <ul id="mergedList"><li class="hint">No batch yet.</li></ul>
-      <button type="button" id="mergedBtn" disabled>Download merged JSON</button>
+      <h3>Map <button type="button" class="mini-btn" data-expand-map="batchMap">Expand map</button></h3>
+      <div id="batchMap" class="workflow-map" aria-label="Map of merged photo features"></div>
     </section>
 
     <section class="card" id="secSfm" data-title="Photo set → 3D">
       <h2>8. Photo set → 3D</h2>
+      <details class="advanced-options"><summary>Reconstruction options &amp; guidance</summary>
       <p class="hint">COLMAP always reconstructs from clean, unlabelled photos. Optional SAM labelling runs afterwards on separate copies. No monocular-depth pass runs.</p>
       <p class="hint" id="sfmBackend">Checking whether this server can run COLMAP…</p>
       <p class="hint">Mixed landscape and portrait photos are fine: portrait phone photos are rotated upright automatically before COLMAP sees them. For a good cloud use 8+ photos of the same subject with 60–80% overlap as you move; blank walls, glass and sky match poorly.</p>
       <label class="row"><input type="checkbox" id="sfmDense" checked> Dense cloud (stereo matching — slower, far denser)</label>
       <label class="row"><input type="checkbox" id="sfmCpu"> Force CPU (skip GPU even when one is visible)</label>
-      <label class="row"><input type="checkbox" id="sfmUseSam"> Use SAM / object labelling after reconstruction (optional)</label>
+      </details>
       <button type="button" id="sfmBtn" class="primary">Reconstruct 3D</button>
       <button type="button" id="sfmDiagnostics" disabled>Download diagnostics</button>
       <p id="sfmOut" role="status"></p>
       <progress id="sfmProg" max="100" value="0" hidden></progress>
       <pre id="sfmLog" class="sfm-log" hidden></pre>
       <ul id="sfmWarn" class="warn-list" hidden></ul>
-      <div id="sfmCleanWrap" hidden>
+      <details id="sfmCleanWrap" hidden><summary>Input photo previews</summary>
         <h3>COLMAP input photos — unlabelled</h3>
         <p class="hint">Previews read from the actual files passed to COLMAP. Any SAM annotations appear only on separate copies below.</p>
         <div id="sfmCleanGrid" class="sam-grid"></div>
-      </div>
+      </details>
       <div id="sfmSamBox" class="sam-box" hidden>
         <h3>SAM labels (per photo — feeds the 3D point labels)</h3>
         <p class="hint" id="sfmSamNote"></p>
         <ul id="sfmSamList"></ul>
       </div>
-      <div id="sfmImgWrap" hidden>
+      <details id="sfmImgWrap" hidden><summary>Annotated photo previews</summary>
         <h3>SAM boxes — separate annotated copies</h3>
         <div id="sfmImgGrid" class="sam-grid"></div>
-      </div>
+      </details>
       <div id="sfmWrap" class="sfm-wrap">
         <div id="sfmToolbar" class="sfm-toolbar" role="toolbar" aria-label="3D tools">
-          <button type="button" id="toolReset" class="tool primary" title="Fit the whole cloud (F)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/></svg><span class="vh">Fit view</span></button>
+          <button type="button" id="toolReset" class="tool primary" title="Fit the whole cloud (Home)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/></svg><span class="vh">Fit view</span></button>
           <button type="button" id="toolTop" class="tool" title="Top view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg><span class="vh">Top</span></button>
-          <button type="button" id="toolResetRoll" class="tool" title="Reset roll (R)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 2.6-6.3"/><path d="M3 4v5h5"/></svg><span class="vh">Reset roll</span></button>
+          <button type="button" id="toolResetRoll" class="tool" title="Reset roll"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 2.6-6.3"/><path d="M3 4v5h5"/></svg><span class="vh">Reset roll</span></button>
           <button type="button" id="toolExpand" class="tool" aria-pressed="false" aria-label="Expand viewer" title="Expand viewer (Esc restores)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4H4v5"/><path d="M15 4h5v5"/><path d="M9 20H4v-5"/><path d="M15 20h5v-5"/></svg><span class="vh">Expand viewer</span></button>
           <button type="button" id="toolZoomIn" class="tool" aria-label="Zoom in" title="Zoom in (+)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M11 8v6"/><path d="M8 11h6"/><path d="M16.5 16.5 21 21"/></svg><span class="vh">Zoom in</span></button>
           <button type="button" id="toolZoomOut" class="tool" aria-label="Zoom out" title="Zoom out (−)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M8 11h6"/><path d="M16.5 16.5 21 21"/></svg><span class="vh">Zoom out</span></button>
@@ -238,14 +295,16 @@
           <label class="tool-slider">Point size <span id="sfmPointSizeVal">1×</span>
             <input type="range" id="sfmPointSize" min="0.25" max="4" step="0.25" value="1" aria-label="Point size">
           </label>
+          <label class="tool-slider">Brightness <input type="range" id="sfmBrightness" min="0.25" max="3" step="0.05" value="1"></label>
+          <div id="sfmBookmarks" class="bookmarks"></div>
         </div>
         <div class="hud-panel hud-right">
-          <h3 class="hud-title">Minimap</h3>
+          <h3 class="hud-title">Map <button type="button" class="mini-btn" data-expand-map="sfmMap">Expand</button></h3>
           <div id="sfmMap" aria-label="Map of photo EXIF GPS locations"></div>
           <p class="hint" id="sfmMapNote">Photo GPS will appear here after reconstruction.</p>
           <h3 class="hud-title">Telemetry</h3>
           <div id="sfmStats" class="sfm-stats" hidden></div>
-          <p class="hint">Markers show the original photo GPS. The cloud uses a local coordinate frame; its scale and north alignment are not calibrated to this map.</p>
+          <p class="hint">Cloud alignment uses registered photo GPS. Fit accuracy is shown above; unaligned clouds remain in local coordinates.</p>
         </div>
         </aside>
         </div>
@@ -272,17 +331,23 @@
           </div>
         </div>
       </div>
-      <p class="hint">SLAM-image-1 viewer: drag to orbit, right-drag to pan, wheel to zoom. Fit view (F) restores the whole scene; Top and Reset roll use the other app's controls. Drag the edges for zoom, pan or roll; hold Shift for fine adjustment. Expand viewer gives more space (Escape restores it).</p>
+      <details class="viewer-help"><summary>3D navigation keys</summary><p>Click the viewer: WASD move, Q/E turn left/right, Z/C roll, R/F rise/lower. Shift moves faster. Home fits the cloud; +/− zoom. Drag to orbit or right-drag to pan.</p></details>
     </section>
     <section class="card" id="secVideo" data-title="Photo + video → DA3 cloud">
       <h2>Photo + video → DA3 cloud</h2>
-      <p class="hint">Zip with ONE photo (EXIF GPS + heading locates the start) and one short video. Depth Anything 3 builds a metric point cloud from the video; concept boxes tag its points; features land on the map from the photo fix + heading. Assumes the video starts where the photo was taken, looking the same way. Real inference needs the depth-anything-3 install on a GPU host — failures say so, never a bare 500.</p>
+      <p class="hint">Upload a ZIP containing one photo with EXIF GPS + heading and one short video. The video should start at the photo location, facing the same direction.</p>
+      <div class="workflow-inputs">
       <label>Zip (1 photo + 1 video)
         <input type="file" id="videoZip" accept=".zip">
       </label>
+      <label>3D output
+        <select id="videoOutput"><option value="points">Point cloud</option><option value="gaussians">Point cloud + Gaussian splatting</option></select>
+      </label>
+      <p class="hint">Model: DA3 GIANT-LARGE 1.1. Gaussian output needs more GPU memory.</p>
       <label>Concepts to tag (comma separated, <code>|line</code> for lines)
         <input type="text" id="videoConcepts" value="door, steps |line" autocomplete="off">
       </label>
+      <details class="advanced-options"><summary>Reconstruction settings</summary>
       <label>Frame budget (2–120; more frames improve overlap and use more GPU memory)
         <input type="number" id="videoMaxFrames" min="2" max="120" value="16" step="1">
       </label>
@@ -302,6 +367,7 @@
       <label class="row"><input type="checkbox" id="videoFilterBlack"> Filter near-black pixels (also removes genuinely dark surfaces)</label>
       <label class="row"><input type="checkbox" id="videoSkipTitles" checked> Skip black title/blank frames before reconstruction (disable for very dark footage)</label>
       <p class="hint">Use a short, steady clip with overlapping views and some sideways movement. The frame limit is spread across the entire clip; a long walk or fast pan can leave too little overlap to align surfaces.</p>
+      </details>
       <label>Detector
         <select id="videoDetector">
           <option value="sam">Server SAM 3</option>
@@ -309,40 +375,72 @@
           <option value="api">Meta API (SAM 3.1 per frame)</option>
         </select>
       </label>
-      <label id="videoTokenRow" hidden>Meta API token (kept in this browser only)
+      <label id="videoTokenRow" hidden>Meta API token (shared through Settings)
         <input type="password" id="videoToken" autocomplete="off">
       </label>
       <label class="row"><input type="checkbox" id="videoSnap"> Snap door/window features to building outlines</label>
       <button type="button" id="videoBtn" class="primary">Build cloud + map features</button>
+      </div>
       <p id="videoOut">No run yet.</p>
       <progress id="videoProg" hidden></progress>
       <pre id="videoLog" class="sfm-log" hidden></pre>
-      <h3>Point cloud</h3>
-      <div class="row">
+      <div class="video-result-layout">
+      <div class="video-3d-pane">
+      <h3>3D view</h3>
+      <div class="viewer-controls">
         <label class="row"><input type="checkbox" id="videoShowCameras" checked> Camera positions and path</label>
         <label>Point size <input type="range" id="videoPointSize" min="0.25" max="2" value="0.5" step="0.25"></label>
+        <label>Brightness <input type="range" id="videoBrightness" min="0.25" max="3" value="1" step="0.05"></label>
+        <label>View <select id="videoRenderMode"><option value="points">Point cloud</option><option value="gaussians" disabled>Gaussian splatting</option></select></label>
+        <button type="button" id="videoFit">Fit view</button>
         <button type="button" id="videoPlyBtn" disabled>Download cloud (PLY)</button>
         <button type="button" id="videoDiagnosticsBtn" disabled>Download diagnostics</button>
       </div>
+      <div id="videoBookmarks" class="bookmarks"></div>
       <div class="viewer-frame video-viewer">
         <div id="videoView"></div>
         <div id="videoPopup" hidden></div>
         <p class="viewer-empty" id="videoEmpty">The DA3 point cloud will appear here.</p>
       </div>
-      <h3>Map features</h3>
+      <details class="viewer-help"><summary>3D navigation keys</summary><p>Click the viewer: WASD move, Q/E turn left/right, Z/C roll, R/F rise/lower. Shift moves faster. Home fits the cloud; +/− zoom.</p></details>
+      </div>
+      <div class="video-map-pane">
+      <h3>Map features <button type="button" class="mini-btn" data-expand-map="videoMap">Expand map</button></h3>
       <ul id="videoFeatures"><li class="hint">No features yet — run with concepts to tag the cloud.</li></ul>
-      <button type="button" id="videoExportBtn" disabled>Export features (GeoJSON)</button>
       <div id="videoMap"></div>
       <p class="hint" id="videoMapNote">Feature pins appear here after a run.</p>
+      </div>
+      </div>
+    </section>
+    <section class="card workflow-export" id="secExport" data-title="Export" hidden>
+      <h2>Export</h2>
+      <div class="export-wrap" data-export-workflow="single">
+        <button type="button" id="exportBtn" disabled>Export ▾</button>
+        <div class="export-menu" id="exportMenu" hidden>
+          <button type="button" id="exportGeoBtn">Export GeoJSON</button>
+          <button type="button" id="exportPngBtn">Annotated PNG</button>
+        </div>
+      </div>
+      <button type="button" id="mergedBtn" data-export-workflow="set-depth" disabled>Export GeoJSON</button>
+      <button type="button" id="sfmGeoBtn" data-export-workflow="set-3d" disabled>Export GeoJSON</button>
+      <button type="button" id="videoExportBtn" data-export-workflow="set-video" disabled>Export GeoJSON</button>
+      <button type="button" id="videoCloudGeoBtn" data-export-workflow="set-video" disabled>Export cloud GeoJSON</button>
+      <p class="hint" id="exportNote">Complete processing and review the map before exporting.</p>
     </section>
   </main>
 
+  <dialog id="mapDialog" class="map-dialog" aria-labelledby="mapDialogTitle">
+    <div class="dlg-head"><h2 id="mapDialogTitle">Explore map</h2><button type="button" id="mapDialogClose">Close</button></div>
+    <div id="mapDialogHost"></div>
+  </dialog>
+
   <dialog id="cfgDlg" class="mg-dlg" aria-labelledby="cfgTitle">
     <div class="dlg-head">
-      <h2 id="cfgTitle">Setup</h2>
+      <h2 id="cfgTitle">Settings</h2>
       <button type="button" id="cfgClose" aria-label="Close setup">✕</button>
     </div>
-    <p class="hint">Set once — kept in this browser.</p>
+    <p class="hint">Shared by all workflows. Settings and API key are saved in this browser; the key is sent only with API requests.</p>
+    <label>SAM 3.1 API key <input type="password" id="tokenInput" autocomplete="off" placeholder="Your Meta SAM 3.1 API key"></label>
     <h3>Detector</h3>
     <label class="row"><input type="radio" name="samBackend" value="api" checked> API SAM 3.1 (needs internet + token below)</label>
     <label class="row"><input type="radio" name="samBackend" value="browser"> Browser SAM3-INT8 (~930 MB once, then fully offline; WebGPU recommended)</label>
@@ -354,9 +452,6 @@
     </label>
     <label>Model
       <input type="text" id="modelInput" autocomplete="off" spellcheck="false">
-    </label>
-    <label>Token (kept in this browser only, never committed)
-      <input type="password" id="tokenInput" autocomplete="off">
     </label>
     <h3>Geometry &amp; depth</h3>
     <label>Horizontal field of view, degrees
@@ -383,16 +478,13 @@
       <button type="button" id="locClose" aria-label="Close location">✕</button>
     </div>
     <p class="hint">Only needed when the photo has no EXIF location — otherwise the photo's own tags win. Each box is projected to an approx map pin using heading + monocular depth.</p>
-    <button type="button" id="gpsBtn">Get GPS location</button>
-    <p id="gpsOut">No location yet.</p>
-    <label>Correct latitude (overrides photo EXIF and the button fix)
+    <label>Correct latitude (overrides photo EXIF)
       <input type="number" id="manualLat" min="-90" max="90" step="0.000001" placeholder="e.g. 51.50740">
     </label>
     <label>Correct longitude
       <input type="number" id="manualLon" min="-180" max="180" step="0.000001" placeholder="e.g. -0.12780">
     </label>
     <p class="hint">Or drag the Camera marker on the map — the boxes update here. Then Send or Re-project.</p>
-    <button type="button" id="headingBtn">Capture compass heading</button>
     <p id="headingOut">No heading yet — point the phone at the subject first.</p>
     <label>Heading, degrees (0 = north, overrides capture)
       <input type="number" id="headingInput" min="0" max="360" step="0.1" placeholder="e.g. 123.4">
@@ -405,7 +497,7 @@
   <script src="exif.js"></script>
   <script src="sam3local.js"></script>
   <script src="mobilenet.js"></script>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="vendor/leaflet.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

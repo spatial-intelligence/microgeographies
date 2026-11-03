@@ -102,21 +102,26 @@ export function buildPlyText(pos, col, labels, idx) {
   return head.join("\n") + "\n";
 }
 
-export function buildGeoJson(pos, col, labels, votes, idx) {
+export function buildGeoJson(pos, col, labels, votes, idx, georeference = null) {
   // Local SfM frame (not geographic): flagged in a foreign member.
   const feats = idx.map((i) => ({
     type: "Feature",
-    geometry: { type: "Point",
-      coordinates: [pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]] },
+    geometry: georeference ? { type: "Point",
+      coordinates: geographicPoint(pos, i, georeference) } : null,
     properties: {
+      local_xyz: [pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]],
       label: labels[i] || "unlabeled",
       votes: votes[i] || 0,
       color: [u8(col[i * 3]), u8(col[i * 3 + 1]), u8(col[i * 3 + 2])]
     }
   }));
-  return JSON.stringify({ type: "FeatureCollection", frame: "local-sfm",
+  return JSON.stringify({ type: "FeatureCollection", frame: georeference ? "WGS84" : "local-sfm (unlocated)", georeference,
     features: feats });
 }
 
 // The runtime viewer is ported from SLAM-image-1; export helpers above stay unchanged.
 export { createViewer } from "./slam-viewer.js";
+export { attachBookmarks } from "./viewer-bookmarks.js";
+export { geographicPoint } from "./geo-cloud.js";
+export { createCloudMapLayer } from "./geo-cloud.js";
+import { geographicPoint } from "./geo-cloud.js";

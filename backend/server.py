@@ -814,6 +814,8 @@ async def sfm(
                 cameras, points, colors, parse_warnings = sfm_mod.parse_model(
                     model_dir)
                 warnings.extend(parse_warnings)
+                from georeference import fit_photo_gps
+                georeference = fit_photo_gps(cameras, photo_locations)
                 diagnostics = sfm_mod.reconstruction_diagnostics(
                     model_dir, os.path.join(workspace, "sfm.db"), cameras)
                 diagnostics["input_images"] = len(names)
@@ -911,6 +913,7 @@ async def sfm(
                     # square), so the page can badge mixed sets.
                     "orientations": orientations,
                     "photo_locations": photo_locations,
+                    "georeference": georeference,
                     "coordinate_frame": "local-sfm",
                     "diagnostics": diagnostics,
                     "cameras": cameras,
@@ -989,6 +992,7 @@ async def video_cloud(
     consistency: str = Form(default="1"),
     filter_black: str = Form(default="0"),
     skip_titles: str = Form(default="1"),
+    gaussians: str = Form(default="0"),
 ):
     """Video workflow: photo (EXIF fix) + short video -> DA3 cloud -> map.
 
@@ -1100,7 +1104,7 @@ async def video_cloud(
 
             emit(f"Running DA3 on {len(frames)} frames; cloud budget {point_cap} points")
             scene = da3_mod.estimate_scene(frames, emit=emit,
-                                           resolution=resolution)
+                                           resolution=resolution, infer_gs=gaussians == "1")
             emit(f"Depth pass done ({scene['model']})")
             if not scene.get("mock") and not str(scene.get("device", "")).startswith("cuda"):
                 warnings.append("DA3 ran on CPU; CUDA was unavailable to the backend process.")
@@ -1165,8 +1169,11 @@ async def video_cloud(
                     "lat/lon; add EXIF GPS + direction (or manual values) "
                     "to place them on the map.")
 
+            from georeference import video_reference
             return {
                 "ply": sfm_mod.write_ply_ascii(points, colors),
+                "gaussians": scene.get("gaussians"),
+                "georeference": video_reference(scene, location, heading_deg),
                 "cameras": cameras,
                 "diagnostics": diagnostics,
                 "point_labels": {str(k): {"label": v["label"],

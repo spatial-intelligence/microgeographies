@@ -7,6 +7,7 @@ import { createViewNavigation } from "./view-navigation.js";
 import { createViewRoll } from "./view-roll.js";
 import { attachPointIdentify } from "./point-identify.js";
 import { createIdentifyTooltip } from "./viewer-annotations.js";
+import { createGaussianLayer } from "./gaussian-view.js";
 
 // Wireframes only: camera poses must never become opaque scene geometry.
 export function createCameraOverlay(cameras, scale) {
@@ -59,7 +60,7 @@ function createCloudView(host, positions, rgb, classes, labels, votes, state, ca
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   host.append(renderer.domElement);
   renderer.domElement.tabIndex = 0;
-  renderer.domElement.setAttribute("aria-label", "3D viewer: drag to orbit, right-drag to pan, wheel to zoom, F to fit, R to reset roll");
+  renderer.domElement.setAttribute("aria-label", "3D viewer: WASD move, QE turn, ZC roll, RF rise/lower, Home fit, plus/minus zoom. Drag to orbit.");
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   const geo = new THREE.BufferGeometry();
@@ -87,6 +88,7 @@ function createCloudView(host, positions, rgb, classes, labels, votes, state, ca
   }
   const span = Math.max(extent.length(), .01);
   const material = new THREE.PointsMaterial({ size: state.pointSize, vertexColors: true, sizeAttenuation: false });
+  material.color.setScalar(state.brightness);
   const points = new THREE.Points(geo, material);
   scene.add(points);
   const cameraOverlay = createCameraOverlay(cameras || [], span * .012);
@@ -125,6 +127,7 @@ function createCloudView(host, positions, rgb, classes, labels, votes, state, ca
   // These fit/top offsets and clipping planes are the other app's main
   // viewer implementation, using the full cloud's bounding-box diagonal.
   function fit(top = false) {
+    cancelFlight(); keys.clear();
     identify.clear();
     controls.target.copy(center);
     const offset = new THREE.Vector3(top ? 0 : span*.45, top ? -span : span*-.35, top ? .0001 : span*-.65);
@@ -136,6 +139,48 @@ function createCloudView(host, positions, rgb, classes, labels, votes, state, ca
     roll.reset();
   }
   const roll = createViewRoll({ host, camera, controls, onNavigate: identify.clear });
+  let flight = null, gaussianLayer = null;
+  const keys = new Set();
+  const getPose = () => ({position: camera.position.toArray(), target: controls.target.toArray(), up: camera.up.toArray(), roll: roll.angle});
+  function cancelFlight() {
+    if (flight) { const resolve = flight.resolve; flight = null; controls.enabled = true; resolve(false); }
+  }
+  function flyTo(pose, duration = 1000) {
+    cancelFlight(); keys.clear(); identify.clear();
+    const from = getPose(); controls.enabled = false;
+    return new Promise(resolve => { flight = {from, to: pose, elapsed: 0, duration: Math.max(1, duration), resolve}; });
+  }
+  function stepCamera(dt) {
+    if (flight) {
+      const f = flight; f.elapsed += dt * 1000;
+      const t = Math.min(1, f.elapsed/f.duration), smooth = t*t*(3-2*t);
+      camera.position.fromArray(f.from.position).lerp(new THREE.Vector3(...f.to.position), smooth);
+      controls.target.fromArray(f.from.target).lerp(new THREE.Vector3(...f.to.target), smooth);
+      camera.up.fromArray(f.from.up).lerp(new THREE.Vector3(...f.to.up), smooth).normalize();
+      // Remove the previous roll before setting the absolute interpolated orientation.
+      roll.set(0); camera.lookAt(controls.target);
+      const delta = Math.atan2(Math.sin(f.to.roll-f.from.roll), Math.cos(f.to.roll-f.from.roll));
+      roll.set(f.from.roll + delta*smooth);
+      if (t === 1) { flight = null; controls.enabled = true; f.resolve(true); }
+    }
+    if (!keys.size) return;
+    const forward = camera.getWorldDirection(new THREE.Vector3());
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+    const up = camera.up.clone().normalize();
+    const speed = span * .18 * dt * (keys.has("shift") ? 3 : 1);
+    const offset = new THREE.Vector3();
+    if (keys.has("w")) offset.addScaledVector(forward, speed);
+    if (keys.has("s")) offset.addScaledVector(forward, -speed);
+    if (keys.has("a")) offset.addScaledVector(right, -speed);
+    if (keys.has("d")) offset.addScaledVector(right, speed);
+    if (keys.has("r")) offset.addScaledVector(up, speed);
+    if (keys.has("f")) offset.addScaledVector(up, -speed);
+    camera.position.add(offset); controls.target.add(offset);
+    const yaw = (Number(keys.has("q"))-Number(keys.has("e"))) * dt;
+    if (yaw) controls.target.copy(camera.position).add(forward.applyAxisAngle(up, yaw).multiplyScalar(Math.max(span*.1, camera.position.distanceTo(controls.target))));
+    const bank = (Number(keys.has("z"))-Number(keys.has("c"))) * dt;
+    if (bank) roll.set(roll.angle + bank);
+  }
   const navigation = createViewNavigation({ host, camera, controls, updateCamera: () => roll.update(), onNavigate: identify.clear });
   function resizeView() {
     const w = host.clientWidth, h = host.clientHeight;
@@ -147,12 +192,16 @@ function createCloudView(host, positions, rgb, classes, labels, votes, state, ca
   const resize = new ResizeObserver(resizeView);
   resize.observe(host);
   resizeView();
-  let frame;
-  function loop() {
+  let frame, previousTime = null;
+  function loop(time = 0) {
     frame = requestAnimationFrame(loop);
-    if (host.offsetParent === null) return;
+    const dt = previousTime === null ? 1/60 : Math.min(.05, Math.max(0, (time-previousTime)/1000));
+    previousTime = time;
+    if (host.offsetParent === null) { keys.clear(); cancelFlight(); return; }
+    stepCamera(dt);
     if (controls.enabled) roll.update();
     if (state.colorMode === "distance") color();
+    gaussianLayer?.update(camera, renderer.domElement.height);
     renderer.render(scene, camera);
   }
   function zoomBy(factor) {
@@ -165,25 +214,43 @@ function createCloudView(host, positions, rgb, classes, labels, votes, state, ca
   }
   function keydown(e) {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.key.toLowerCase() === "f") fit();
-    else if (e.key.toLowerCase() === "r") roll.reset();
+    const key = e.key.toLowerCase();
+    if ("wasdqezcrf".includes(key) && key.length === 1 || key === "shift") { cancelFlight(); identify.clear(); keys.add(key); }
+    else if (e.key === "Home") { cancelFlight(); fit(); }
     else if (e.key === "+" || e.key === "=") zoomBy(1.25);
     else if (e.key === "-") zoomBy(.8);
     else return;
     e.preventDefault();
   }
+  const keyup = e => keys.delete(e.key.toLowerCase());
+  const blur = () => keys.clear();
+  const pointerdown = () => { cancelFlight(); renderer.domElement.focus({preventScroll: true}); };
   renderer.domElement.addEventListener("keydown", keydown);
+  renderer.domElement.addEventListener("keyup", keyup);
+  renderer.domElement.addEventListener("blur", blur);
+  renderer.domElement.addEventListener("pointerdown", pointerdown);
   color(); fit(); loop();
-  return { fit, zoomBy, color, resetRoll: () => roll.reset(),
+  return { fit, zoomBy, color, getPose, flyTo, cancelFlight, resetRoll: () => roll.reset(),
+    setGaussians(data) {
+      if (gaussianLayer) { scene.remove(gaussianLayer.mesh); gaussianLayer.dispose(); }
+      gaussianLayer = data ? createGaussianLayer(data) : null;
+      if (gaussianLayer) { scene.add(gaussianLayer.mesh); gaussianLayer.setBrightness(state.brightness); gaussianLayer.setSize(state.pointSize/2); }
+    },
+    setRenderMode(mode) { points.visible = mode !== "gaussians" || !gaussianLayer; if (gaussianLayer) gaussianLayer.mesh.visible = mode === "gaussians"; },
+    setBrightness(value) { material.color.setScalar(value); gaussianLayer?.setBrightness(value); },
     setCamerasVisible(visible) { cameraOverlay.visible = visible; },
-    setSize(size) { material.size = size; }, clearIdentify: identify.clear,
+    setSize(size) { material.size = size; gaussianLayer?.setSize(size/2); }, clearIdentify: identify.clear,
     dispose() {
+      cancelFlight(); gaussianLayer?.dispose();
       cancelAnimationFrame(frame);
       identify.dispose(); navigation.dispose(); roll.dispose();
       resize.disconnect(); controls.removeEventListener("start", identify.clear);
       controls.dispose(); geo.dispose(); material.dispose();
       cameraOverlay.traverse(object => { object.geometry?.dispose(); object.material?.dispose(); });
       renderer.domElement.removeEventListener("keydown", keydown);
+      renderer.domElement.removeEventListener("keyup", keyup);
+      renderer.domElement.removeEventListener("blur", blur);
+      renderer.domElement.removeEventListener("pointerdown", pointerdown);
       renderer.dispose(); renderer.domElement.remove();
     },
   };
@@ -192,7 +259,7 @@ function createCloudView(host, positions, rgb, classes, labels, votes, state, ca
 // Adapter for this app's existing PLY, class colours, tools and exports.
 export function createViewer(container, oldPopup) {
   let view = null;
-  const state = { colorMode: "photo", pointSize: 2, tool: "orbit", camerasVisible: true };
+  const state = { colorMode: "photo", pointSize: 2, brightness: 1, tool: "orbit", camerasVisible: true };
   if (oldPopup) oldPopup.hidden = true;
   return {
     setCloud(positions, rgb, classes, labels = [], votes = [], cameras = []) {
@@ -206,6 +273,12 @@ export function createViewer(container, oldPopup) {
     setTool(tool) { state.tool = tool; view?.clearIdentify(); },
     setColorMode(mode) { state.colorMode = mode; view?.color(); },
     setPointSize(mult) { state.pointSize = 2 * mult; view?.setSize(state.pointSize); },
+    setBrightness(value) { state.brightness = Math.max(.25, Math.min(3, Number(value) || 1)); view?.setBrightness(state.brightness); },
+    setGaussians(data) { view?.setGaussians(data); },
+    setRenderMode(mode) { view?.setRenderMode(mode); },
+    getPose() { return view?.getPose() || null; },
+    flyTo(pose, duration) { return view?.flyTo(pose, duration) || Promise.resolve(false); },
+    cancelFlight() { view?.cancelFlight(); },
     setCamerasVisible(visible) { state.camerasVisible = Boolean(visible); view?.setCamerasVisible(state.camerasVisible); },
     dispose() { view?.dispose(); view = null; container.innerHTML = ""; },
   };

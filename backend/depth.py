@@ -303,7 +303,15 @@ def extract_exif_gps(pil_image):
             lon = -lon
         if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
             return None
-        return {"lat": lat, "lon": lon}
+        location = {"lat": lat, "lon": lon}
+        if 6 in gps_ifd:
+            altitude = _rational_to_float(gps_ifd[6])
+            ref = gps_ifd.get(5, 0)
+            if ref == 1 or ref == b"\x01":
+                altitude = -altitude
+            if math.isfinite(altitude):
+                location["altitude_m"] = altitude
+        return location
     except Exception:
         return None
 

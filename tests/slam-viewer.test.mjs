@@ -91,5 +91,30 @@ viewer.setCamerasVisible(false);
 assert.equal(renderedScene.getObjectByName('camera-overlays').visible,false);
 viewer.setCamerasVisible(true);
 assert.equal(renderedScene.getObjectByName('camera-overlays').visible,true);
+// Navigation keys move only the focused viewer, with F now lowering the camera.
+const press = key => { for(const fn of canvas.listeners.get('keydown') || []) fn({key,preventDefault(){}}); };
+const release = key => { for(const fn of canvas.listeners.get('keyup') || []) fn({key}); };
+const advance = time => nextFrame(time);
+let time = 100;
+for(const key of ['w','s','a','d','r','f']) {
+  const before = renderedCamera.position.clone();
+  press(key); advance(time+=40); release(key);
+  assert.ok(before.distanceTo(renderedCamera.position)>0, `${key} must move the camera`);
+}
+for(const key of ['q','e','z','c']) {
+  const before = renderedCamera.quaternion.clone();
+  press(key); advance(time+=40); release(key);
+  assert.ok(before.angleTo(renderedCamera.quaternion)>0, `${key} must rotate the camera`);
+}
+viewer.setBrightness(1.5);
+assert.equal(renderedScene.children[0].material.color.r,1.5);
+const saved=viewer.getPose();
+press('w');advance(time+=40);release('w');
+const flight=viewer.flyTo(saved,100);
+for(let i=0;i<5;i++)advance(time+=40);
+assert.equal(await flight,true);
+assert.ok(renderedCamera.position.distanceTo(new Three.Vector3(...saved.position))<1e-7);
+const cancelled=viewer.flyTo(saved,1000);viewer.cancelFlight();
+assert.equal(await cancelled,false);
 viewer.dispose();assert.equal(host.children.length,0);assert.equal(nextFrame,null);
 export const navigationChecksPassed=true;

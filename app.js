@@ -2,10 +2,36 @@
   "use strict";
   const $ = (id) => document.getElementById(id);
   const cfg = window.MG_CONFIG || {};
+  const overviewMaps = new Map(), cloudMapLayers = new Map();
+  let sfmBookmarks = null, videoBookmarks = null;
+  function registerMap(id, instance) {
+    overviewMaps.set(id, instance);
+    new ResizeObserver(() => instance.invalidateSize()).observe($(id));
+  }
+  function initWorkflowMaps(mode) {
+    if (mode === "single") renderMap();
+    if (mode === "set-3d" && !sfmMap) renderSfmMap({});
+    if (mode === "set-video" && !videoMap) renderVideoMap({});
+    if (mode === "set-depth" && !overviewMaps.has("batchMap") && window.L) {
+      const instance = window.L.map("batchMap", {maxZoom: 22}).setView([20,0],2);
+      window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 22, maxNativeZoom: 19, attribution: "&copy; OpenStreetMap contributors"
+      }).addTo(instance);
+      registerMap("batchMap", instance);
+    }
+    overviewMaps.forEach(instance => instance.invalidateSize());
+  }
+  function updateCloudMap(id, cloud, reference, library) {
+    cloudMapLayers.get(id)?.remove(); cloudMapLayers.delete(id);
+    if (!reference?.available || !overviewMaps.has(id)) return;
+    const instance = overviewMaps.get(id);
+    const layer = library.createCloudMapLayer(window.L, instance, cloud.positions, cloud.colors, reference);
+    cloudMapLayers.set(id, layer);
+    if (layer.bounds.isValid()) instance.fitBounds(layer.bounds, {padding:[24,24], maxZoom:20});
+  }
 
   const fileInput = $("fileInput"), promptsInput = $("promptsInput"),
-    gpsBtn = $("gpsBtn"), gpsOut = $("gpsOut"),
-    headingBtn = $("headingBtn"), headingOut = $("headingOut"),
+    headingOut = $("headingOut"),
     headingInput = $("headingInput"), hfovInput = $("hfovInput"),
     rangeInput = $("rangeInput"),
     depthBackend = $("depthBackend"), depthModel = $("depthModel"),
@@ -35,46 +61,6 @@
   let sentSize = null; // pixel size of the image SAM actually saw
   let headingDeg = null; // compass bearing of the camera axis
 
-  headingBtn.addEventListener("click", () => {
-    if (!("DeviceOrientationEvent" in window)) {
-      headingOut.textContent = "Compass not available — type the heading manually.";
-      return;
-    }
-    const start = () => {
-      headingOut.textContent = "Reading compass — hold the phone steady, pointing at the subject…";
-      const handler = (e) => {
-        let h = null, approx = false;
-        if (e.webkitCompassHeading != null && e.webkitCompassHeading !== 0) {
-          h = e.webkitCompassHeading; // iOS, true north
-        } else if (e.alpha != null) {
-          h = (360 - e.alpha) % 360; // Android; true north only when absolute
-          approx = e.absolute !== true;
-        }
-        if (h == null || Number.isNaN(h)) return;
-        window.removeEventListener("deviceorientationabsolute", handler);
-        window.removeEventListener("deviceorientation", handler);
-        headingDeg = Math.round(h * 10) / 10;
-        headingInput.value = headingDeg;
-        headingOut.textContent = `Heading ${headingDeg}°${approx ? " (relative — may not be true north)" : ""}.`;
-      };
-      window.addEventListener("deviceorientationabsolute", handler);
-      window.addEventListener("deviceorientation", handler);
-      setTimeout(() => {
-        window.removeEventListener("deviceorientationabsolute", handler);
-        window.removeEventListener("deviceorientation", handler);
-        if (headingDeg == null) headingOut.textContent = "No compass reading — type the heading manually.";
-      }, 8000);
-    };
-    // iOS needs an explicit permission gesture.
-    if (typeof DeviceOrientationEvent.requestPermission === "function") {
-      DeviceOrientationEvent.requestPermission().then((r) => {
-        if (r === "granted") start();
-        else headingOut.textContent = "Compass permission denied — type the heading manually.";
-      }).catch(() => { headingOut.textContent = "Compass failed — type the heading manually."; });
-    } else {
-      start();
-    }
-  });
   headingInput.addEventListener("change", () => {
     const v = parseFloat(headingInput.value);
     headingDeg = Number.isFinite(v) ? ((v % 360) + 360) % 360 : null;
@@ -99,20 +85,20 @@
   function previewExif(file) {
     exifOut.textContent = "Reading photo metadata…";
     if (/heic|heif/i.test(file.type) || /\.hei[cf]$/i.test(file.name || "")) {
-      sayExif("HEIC photo — direction/location tags can't be read here. Convert to JPEG first, or use live GPS + manual heading.");
+      sayExif("HEIC photo — direction/location tags can't be read here. Convert to JPEG first, or enter the photo location and heading manually.");
       return;
     }
     file.arrayBuffer().then((buf) => {
       const ex = window.MG_EXIF ? window.MG_EXIF.parseGPS(buf) : null;
       if (!ex || !ex.hasExif) {
-        sayExif("No EXIF in this photo (screenshot, PNG, or stripped upload) — the live fix will be used. Press Get GPS location, and capture or type the heading.");
+        sayExif("No EXIF in this photo (screenshot, PNG, or stripped upload) — enter its location and heading using Location & heading.");
         return;
       }
       const bits = [];
       if (ex.lat != null && ex.lon != null) bits.push(`location ${ex.lat.toFixed(6)}, ${ex.lon.toFixed(6)}`);
       if (ex.heading != null) bits.push(`heading ${ex.heading}°`);
       if (!bits.length) {
-        sayExif("Photo has EXIF but no GPS location — the live fix will be used. Press Get GPS location, and capture or type the heading.");
+        sayExif("Photo has EXIF but no GPS location — enter its location and heading using Location & heading.");
         return;
       }
       const used = [];
@@ -120,14 +106,9 @@
       if (ex.heading != null && currentHeading() == null) used.push("heading");
       sayExif(`Photo EXIF holds ${bits.join(" + ")} — will be used (${used.join(" + ")}), not this computer's.`);
     }).catch(() => {
-      sayExif("Could not read photo metadata — the live fix will be used.");
+      sayExif("Could not read photo metadata — enter the photo location and heading manually.");
     });
   }
-
-  // Secure-context note (geolocation needs HTTPS, localhost counts as secure).
-  $("secureNote").textContent = window.isSecureContext
-    ? "Secure context — GPS available."
-    : "Not a secure context — GPS needs HTTPS (or localhost).";
 
   // Light/dark theme. The inline script in <head> already set
   // html[data-theme] before first paint (blueprint dark by default);
@@ -205,6 +186,23 @@
   if (locBtn) locBtn.addEventListener("click", () => openDlg(locDlg));
   if (cfgClose) cfgClose.addEventListener("click", () => cfgDlg.close());
   if (locClose) locClose.addEventListener("click", () => { locDlg.close(); refreshLocState(); });
+  const mapDialog = $("mapDialog");
+  let expandedMap = null;
+  document.querySelectorAll("[data-expand-map]").forEach(button => button.addEventListener("click", () => {
+    const id = button.dataset.expandMap, instance = overviewMaps.get(id);
+    if (!instance) return;
+    const element = $(id), placeholder = document.createComment("map position");
+    element.before(placeholder); $("mapDialogHost").append(element);
+    expandedMap = {element, placeholder, instance};
+    openDlg(mapDialog); requestAnimationFrame(() => instance.invalidateSize());
+  }));
+  $("mapDialogClose").addEventListener("click", () => mapDialog.close());
+  mapDialog.addEventListener("close", () => {
+    if (!expandedMap) return;
+    const {element, placeholder, instance} = expandedMap;
+    placeholder.replaceWith(element); expandedMap = null;
+    requestAnimationFrame(() => instance.invalidateSize());
+  });
   [cfgDlg, locDlg].forEach((d) => {
     if (d) d.addEventListener("click", (e) => { if (e.target === d) d.close(); });
   });
@@ -228,8 +226,7 @@
     if (!locState) return;
     const m = currentManual();
     if (m) locState.textContent = `Location: manual override ${m.lat.toFixed(5)}, ${m.lon.toFixed(5)}.`;
-    else if (gps) locState.textContent = `Location: live fix ${gps.lat.toFixed(5)}, ${gps.lon.toFixed(5)} (photo EXIF wins when present).`;
-    else locState.textContent = "Location: photo EXIF when present, else live fix.";
+    else locState.textContent = "Location: photo EXIF, or enter a correction.";
   }
   refreshLocState();
 
@@ -302,21 +299,6 @@
     };
     img.onerror = () => setStatus("Could not read that image.", true);
     img.src = url;
-  });
-
-  gpsBtn.addEventListener("click", () => {
-    if (!("geolocation" in navigator)) { gpsOut.textContent = "Geolocation not supported."; return; }
-    gpsOut.textContent = "Locating…";
-    navigator.geolocation.getCurrentPosition(
-      (p) => {
-        gps = { lat: p.coords.latitude, lon: p.coords.longitude,
-                accuracyM: p.coords.accuracy, at: new Date(p.timestamp).toISOString() };
-        gpsOut.textContent = `Lat ${gps.lat.toFixed(6)}, lon ${gps.lon.toFixed(6)} (±${Math.round(gps.accuracyM)} m, ${gps.at})`;
-        refreshLocState();
-      },
-      (e) => { gpsOut.textContent = `Location failed: ${e.message}`; },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
-    );
   });
 
   sendBtn.addEventListener("click", async () => {
@@ -570,7 +552,7 @@
   // Meta Responses API, matching the proven Colab shape: one request per
   // concept, image sent once as a data URL, boxes pulled from each reply.
   async function postSamMeta(blob, prompts) {
-    if (!tokenInput.value) throw new Error("Paste your Meta API key into the Token field first.");
+    if (!tokenInput.value) { openDlg(cfgDlg); throw new Error("Enter your SAM 3.1 API key in Settings."); }
     if (!imgEl) throw new Error("Pick a photo first.");
     // Phone photos are huge and sometimes odd formats — normalize to a
     // bounded JPEG so the API gets what it accepts. Boxes come back in
@@ -915,19 +897,29 @@
   // the two routes that need pins (single photo, batch); the 3D route
   // is COLMAP geometry with depth-free labels.
   const MODES = {
-    single: { sections: ["secPhoto", "secObjects", "secDetector", "secResults", "secMatch", "secStage"],
-              note: "Single-photo route: detect, depth, map pin." },
-    "set-depth": { sections: ["secSet", "secBatch"],
-              note: "Set route: the shared zip + concepts above; depth runs per photo for pins." },
-    "set-3d": { sections: ["secSet", "secSfm"],
-              note: "Set route: the shared zip + concepts above; COLMAP only — no depth pass." },
-    "set-video": { sections: ["secVideo"],
-              note: "Photo + video route: DA3 point cloud, tagged features, map pins." },
+    single: { sections: ["secPhoto", "secObjects", "secResults", "secMatch", "secStage", "secExport"],
+              note: "Single-photo route: detect, depth, map pin.",
+              title: "Single photo",
+              blurb: "Detect objects, monocular depth, map pin." },
+    "set-depth": { sections: ["secSet", "secBatch", "secExport"],
+              note: "Set route: the shared zip + concepts above; depth runs per photo for pins.",
+              title: "Photo set → pins",
+              blurb: "Zip in, depth + merged map pins per photo." },
+    "set-3d": { sections: ["secSet", "secSfm", "secExport"],
+              note: "Set route: the shared zip + concepts above; COLMAP only — no depth pass.",
+              title: "Photo set → 3D",
+              blurb: "Zip in, COLMAP cloud with labels. No depth pass." },
+    "set-video": { sections: ["secVideo", "secExport"],
+              note: "Photo + video route: DA3 point cloud, tagged features, map pins.",
+              title: "Photo + video → DA3 cloud",
+              blurb: "Photo + video zip; DA3 cloud, tagged features, map pins. Needs GPU install." },
   };
   const modeOut = $("modeOut");
   function syncSetLabellingControls() {
     const disabled = currentMode() === "set-3d" && !$("sfmUseSam").checked;
+    $("setSamToggle").hidden = currentMode() !== "set-3d";
     ["setConcepts", "setDetector", "setApiToken"].forEach((id) => { $(id).disabled = disabled; });
+    ["setConcepts", "setDetector"].forEach(id => { $(id).closest("label").hidden = disabled; });
     $("setLabellingNote").hidden = !disabled;
   }
   $("sfmUseSam").addEventListener("change", syncSetLabellingControls);
@@ -943,7 +935,7 @@
     const vis = MODES[mode].sections;
     let n = 0;
     ["secPhoto", "secObjects", "secDetector", "secResults", "secMatch", "secStage",
-     "secSet", "secBatch", "secSfm", "secVideo"].forEach((id) => {
+     "secSet", "secBatch", "secSfm", "secVideo", "secExport"].forEach((id) => {
       const sec = $(id);
       if (!sec) return;
       const show = vis.indexOf(id) >= 0;
@@ -967,10 +959,105 @@
     try { localStorage.setItem("mg.mode", mode); } catch (e) { /* private mode */ }
   }
   document.querySelectorAll('input[name="mode"]').forEach((el) => {
-    el.addEventListener("change", () => setMode(el.value));
+    el.addEventListener("change", () => openWorkflow(el.value));
   });
-  try { setMode(localStorage.getItem("mg.mode") || "single"); }
-  catch (e) { setMode("single"); }
+  // Landing + sub-page routing: the donut on #landing opens one
+  // workflow view; the workflow nav returns to the landing.
+  const landing = $("landing"), workflowNav = $("workflowNav"),
+    workflowTitle = $("workflowTitle"), workflowBlurb = $("workflowBlurb"),
+    backBtn = $("backBtn");
+  const ALL_SECTIONS = ["secPhoto", "secObjects", "secDetector", "secResults", "secMatch", "secStage",
+    "secSet", "secBatch", "secSfm", "secVideo", "secExport"];
+  function paintWorkflowNav(mode) {
+    if (workflowTitle) workflowTitle.textContent = MODES[mode].title;
+    if (workflowBlurb) workflowBlurb.textContent = MODES[mode].blurb;
+    document.querySelectorAll('.workflow-switch [data-workflow]').forEach((btn) => {
+      if (btn.getAttribute("data-workflow") === mode) btn.setAttribute("aria-current", "page");
+      else btn.removeAttribute("aria-current");
+    });
+  }
+  function workflowUrl(mode) {
+    const u = new URL(window.location.href);
+    u.searchParams.set("workflow", mode);
+    u.hash = "";
+    return u.toString();
+  }
+  function landingUrl() {
+    const u = new URL(window.location.href);
+    u.searchParams.delete("workflow");
+    u.hash = "";
+    return u.toString();
+  }
+  function openWorkflow(mode, opts) {
+    sfmBookmarks?.stop(); videoBookmarks?.stop();
+    if (!MODES[mode]) mode = "single";
+    setMode(mode);
+    paintWorkflowNav(mode);
+    if (landing) landing.hidden = true;
+    if (workflowNav) workflowNav.hidden = true;
+    document.body.dataset.view = "workflow";
+    document.querySelectorAll("[data-export-workflow]").forEach(el => { el.hidden = el.dataset.exportWorkflow !== mode; });
+    requestAnimationFrame(() => initWorkflowMaps(mode));
+    const nav = (opts && opts.push === false) ? "replaceState" : "pushState";
+    try {
+      window.history[nav]({ workflow: mode }, "", workflowUrl(mode));
+    } catch (e) { /* file:// or private mode */ }
+    window.scrollTo(0, 0);
+  }
+  function showLanding(opts) {
+    sfmBookmarks?.stop(); videoBookmarks?.stop();
+    ALL_SECTIONS.forEach((id) => { const sec = $(id); if (sec) sec.hidden = true; });
+    if (landing) landing.hidden = false;
+    if (workflowNav) workflowNav.hidden = true;
+    document.body.dataset.view = "landing";
+    document.body.classList.remove("wide");
+    const nav = (opts && opts.push === false) ? "replaceState" : "pushState";
+    try {
+      window.history[nav]({}, "", landingUrl());
+    } catch (e) { /* file:// or private mode */ }
+    window.scrollTo(0, 0);
+  }
+  function routeFromUrl() {
+    try {
+      const u = new URL(window.location.href);
+      const q = u.searchParams.get("workflow");
+      if (q && MODES[q]) return q;
+      const m = (u.hash || "").match(/^#\/workflow\/([\w-]+)/);
+      if (m && MODES[m[1]]) return m[1];
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+  document.querySelectorAll('[data-workflow]').forEach((el) => {
+    if (el.classList && el.classList.contains("donut-quad")) {
+      el.addEventListener("click", () => openWorkflow(el.getAttribute("data-workflow")));
+      el.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openWorkflow(el.getAttribute("data-workflow")); }
+      });
+    } else {
+      el.addEventListener("click", () => openWorkflow(el.getAttribute("data-workflow")));
+    }
+  });
+  $("homeLink").addEventListener("click", e => { e.preventDefault(); showLanding(); });
+  $("settingsBtn").addEventListener("click", () => openDlg(cfgDlg));
+  if (backBtn) backBtn.addEventListener("click", () => showLanding());
+  window.addEventListener("popstate", () => {
+    const routed = routeFromUrl();
+    if (routed) openWorkflow(routed, { push: false });
+    else showLanding({ push: false });
+  });
+  window.addEventListener("hashchange", () => {
+    const routed = routeFromUrl();
+    if (routed) openWorkflow(routed, { push: false });
+  });
+  let storedMode = "single";
+  try { storedMode = localStorage.getItem("mg.mode") || "single"; }
+  catch (e) { /* private mode */ }
+  if (!MODES[storedMode]) storedMode = "single";
+  setMode(storedMode);
+  paintWorkflowNav(storedMode);
+  const initial = routeFromUrl();
+  if (initial) openWorkflow(initial, { push: false });
+  else showLanding({ push: false });
 
   // Batch: a zip of photos in, per-image previews + JSON plus one merged
   // feature set out. Same origin (/api/batch) like /api/project.
@@ -988,7 +1075,7 @@
   tokenInput.addEventListener("input", () => { setApiToken.value = tokenInput.value; });
   function zipDetectorFields(fd) {
     if (setDetector.value === "api") {
-      if (!setApiToken.value.trim()) throw new Error("Enter your Meta API token above.");
+      if (!setApiToken.value.trim()) { openDlg(cfgDlg); throw new Error("Enter your SAM 3.1 API key in Settings."); }
       fd.append("sam_token", setApiToken.value.trim());
     }
   }
@@ -1126,10 +1213,11 @@
   }
 
   mergedBtn.addEventListener("click", () => {
-    if (lastBatch && lastBatch.merged) saveJson(lastBatch.merged, "microgeo-merged.json");
+    if (lastBatch && lastBatch.merged) downloadVideoArtifact(JSON.stringify(lastBatch.merged), "microgeo-merged.geojson", "application/geo+json");
   });
 
   function renderBatchPins(feats) {
+    const map = overviewMaps.get("batchMap");
     if (!window.L || !map) return;
     if (batchLayers) batchLayers.remove();
     if (!feats.length) return;
@@ -1170,6 +1258,7 @@
     if (!window.L) { note.textContent = "Map library unavailable. Internet access is required to load the map."; return; }
     if (!sfmMap) {
       sfmMap = window.L.map("sfmMap").setView([20, 0], 2);
+      registerMap("sfmMap", sfmMap);
       window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
         maxZoom: 20, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       }).addTo(sfmMap);
@@ -1196,6 +1285,7 @@
   function sfmEnsureViewer() {
     if (sfmViewer || !sfmLib) return sfmViewer;
     sfmViewer = sfmLib.createViewer($("sfmView"), $("sfmPopup"));
+    sfmBookmarks = sfmLib.attachBookmarks($("sfmBookmarks"), () => sfmViewer);
     wireSfmTools();
     return sfmViewer;
   }
@@ -1298,6 +1388,7 @@
       if (sfmViewer) sfmViewer.setColorMode(colorSel.value);
     });
     const sizeSel = $("sfmPointSize");
+    $("sfmBrightness").addEventListener("input", () => sfmViewer?.setBrightness($("sfmBrightness").value));
     if (sizeSel) sizeSel.addEventListener("input", () => {
       const v = parseFloat(sizeSel.value) || 1;
       const val = $("sfmPointSizeVal");
@@ -1487,7 +1578,7 @@
       text = sfmLib.buildPlyText(sfmData.positions, sfmData.colors, sfmData.labels, idx);
       ext = "ply"; mime = "text/plain";
     } else if (fmt === "geojson") {
-      text = sfmLib.buildGeoJson(sfmData.positions, sfmData.colors, sfmData.labels, sfmData.votes, idx);
+      text = sfmLib.buildGeoJson(sfmData.positions, sfmData.colors, sfmData.labels, sfmData.votes, idx, sfmData.georeference?.available ? sfmData.georeference : null);
       ext = "geojson"; mime = "application/geo+json";
     } else {
       text = sfmLib.buildXyzText(sfmData.positions, sfmData.colors, sfmData.labels, idx);
@@ -1608,6 +1699,7 @@
       if (!data) throw new Error("the 3D stream ended before any result arrived");
       if (data.error) throw new Error(data.error);
       sfmReport = {diagnostics: data.diagnostics, cameras: data.cameras,
+        georeference: data.georeference,
         registered: data.registered, unregistered: data.unregistered, warnings: data.warnings,
         label_objects: data.label_objects, colmap_inputs_annotated: data.colmap_inputs_annotated};
       $("sfmDiagnostics").disabled = false;
@@ -1632,12 +1724,21 @@
       }
       sfmData = {
         positions: cloud.positions, colors: cloud.colors,
-        labels, votes, count: cloud.count, dense,
+        labels, votes, count: cloud.count, dense, georeference: data.georeference,
       };
       const viewer = sfmEnsureViewer();
+      sfmBookmarks.setScene(cloud.positions);
       viewer.setCloud(cloud.positions, cloud.colors,
         sfmLib.labeledColors(cloud.count, dense ? (data.dense_labels || {}) : (data.point_labels || {})),
         labels, votes, data.cameras || []);
+      viewer.setBrightness($("sfmBrightness").value);
+      viewer.setPointSize(Number($("sfmPointSize").value));
+      updateCloudMap("sfmMap", cloud, data.georeference, sfmLib);
+      const reference = data.georeference;
+      $("sfmMapNote").textContent += reference?.available
+        ? ` Cloud aligned using ${reference.photos_used.length} photos; GPS fit RMS ${reference.rms_m.toFixed(2)} m.${reference.altitude_assumed_level ? " Camera heights assumed level." : ""}`
+        : ` ${reference?.reason || "No geographic cloud alignment available."}`;
+      $("sfmGeoBtn").disabled = false;
       $("sfmEmpty").hidden = true;
       const unreg = (data.unregistered || []).length;
       const nLab = labels.filter(Boolean).length;
@@ -1671,10 +1772,23 @@
     videoFeatures = $("videoFeatures"), videoExportBtn = $("videoExportBtn"),
     videoMapNote = $("videoMapNote");
   let videoViewer = null, videoLib = null, videoMap = null, videoMarkers = null;
-  let videoData = null;
+  let videoData = null, videoCloud = null;
+  // A single Settings key is shared immediately across every API workflow.
+  videoToken.value = tokenInput.value;
+  [tokenInput, setApiToken, videoToken].forEach(input => input.addEventListener("input", () => {
+    [tokenInput, setApiToken, videoToken].forEach(other => { other.value = input.value; });
+    try { localStorage.setItem("mg.token", input.value); } catch (_) { /* private mode */ }
+  }));
+  $("sfmGeoBtn").addEventListener("click", () => {
+    if (!sfmData || !sfmLib) return;
+    const reference = sfmData.georeference?.available ? sfmData.georeference : null;
+    downloadVideoArtifact(sfmLib.buildGeoJson(sfmData.positions, sfmData.colors, sfmData.labels,
+      sfmData.votes, sfmLib.sampleIndex(sfmData.count,100), reference), "microgeo-cloud.geojson", "application/geo+json");
+    $("exportNote").textContent = reference ? "Exported cloud in WGS84 coordinates." : "No reliable GPS fit: exported local coordinates as properties with null map geometry.";
+  });
 
   videoDetector.addEventListener("change", () => {
-    videoTokenRow.hidden = videoDetector.value !== "api";
+    videoTokenRow.hidden = true;
   });
 
   async function readNdjson(res, onLog) {
@@ -1701,6 +1815,9 @@
   videoBtn.addEventListener("click", async () => {
     const zf = videoZip.files[0];
     if (!zf) { videoOut.textContent = "Pick the zip (1 photo + 1 video) first."; return; }
+    if (videoDetector.value === "api" && !tokenInput.value.trim()) {
+      openDlg(cfgDlg); videoOut.textContent = "Enter your SAM 3.1 API key in Settings."; return;
+    }
     const parsed = parsePrompts(videoConcepts.value);
     const fd = new FormData();
     fd.append("zipfile", zf);
@@ -1709,12 +1826,13 @@
     fd.append("max_points", $("videoMaxPoints").value || "1000000");
     fd.append("sample_fps", $("videoSampleFps").value || "10");
     fd.append("resolution", $("videoResolution").value || "low");
+    fd.append("gaussians", $("videoOutput").value === "gaussians" ? "1" : "0");
     fd.append("consistency", $("videoConsistency").checked ? "1" : "0");
     fd.append("filter_black", $("videoFilterBlack").checked ? "1" : "0");
     fd.append("skip_titles", $("videoSkipTitles").checked ? "1" : "0");
     geomsField(fd, geomsMap(parsed));
     fd.append("detector", videoDetector.value || "sam");
-    if (videoDetector.value === "api") fd.append("sam_token", videoToken.value || "");
+    if (videoDetector.value === "api") fd.append("sam_token", tokenInput.value.trim());
     if (videoSnap.checked) fd.append("snap", "1");
     videoBtn.disabled = true;
     videoProg.hidden = false;
@@ -1749,6 +1867,7 @@
     videoLib = videoLib || await import("./sfm3d.js");
     const cloud = videoLib.parsePly(data.ply || "");
     if (!cloud.count) throw new Error("the server returned an empty point cloud");
+    videoCloud = cloud;
     const raw = data.point_labels || {};
     const labels = [], votes = [];
     for (let i = 0; i < cloud.count; i++) {
@@ -1756,11 +1875,20 @@
       labels.push(info ? info.label : null);
       votes.push(info ? (info.votes || 0) : 0);
     }
-    videoViewer = videoViewer || videoLib.createViewer($("videoView"), $("videoPopup"));
+    if (!videoViewer) {
+      videoViewer = videoLib.createViewer($("videoView"), $("videoPopup"));
+      videoBookmarks = videoLib.attachBookmarks($("videoBookmarks"), () => videoViewer);
+    }
+    videoBookmarks.setScene(cloud.positions);
     videoViewer.setCloud(cloud.positions, cloud.colors,
       videoLib.labeledColors(cloud.count, raw), labels, votes, data.cameras || []);
     videoViewer.setCamerasVisible($("videoShowCameras").checked);
     videoViewer.setPointSize(Number($("videoPointSize").value));
+    videoViewer.setBrightness($("videoBrightness").value);
+    videoViewer.setGaussians(data.gaussians || null);
+    $("videoRenderMode").querySelector('[value="gaussians"]').disabled = !data.gaussians;
+    $("videoRenderMode").value = data.gaussians ? "gaussians" : "points";
+    videoViewer.setRenderMode($("videoRenderMode").value);
     videoViewer.fitBounds();
     $("videoEmpty").hidden = true;
     $("videoPlyBtn").disabled = false;
@@ -1784,12 +1912,17 @@
       videoFeatures.appendChild(li);
     });
     renderVideoMap(data);
+    updateCloudMap("videoMap", cloud, data.georeference, videoLib);
+    videoMapNote.textContent += data.georeference?.available
+      ? " Metric cloud overlaid using the photo GPS and heading; first view assumed level."
+      : ` ${data.georeference?.reason || "No geographic alignment available."}`;
     videoExportBtn.disabled = !feats.length;
+    $("videoCloudGeoBtn").disabled = false;
     const nLab = labels.filter(Boolean).length;
     videoOut.textContent = `Done — ${cloud.count} point(s) from ${data.frames} frame(s)` +
       (data.mock ? " (mock DA3)" : "") +
       (data.diagnostics?.device ? ` · ${data.diagnostics.device}` : "") +
-      `, ${nLab} labelled, ${feats.length} map feature(s)` +
+      `, ${nLab} labelled, ${feats.length} map feature(s) · ${data.model || "DA3"}` +
       (data.warnings && data.warnings.length ? `. ${data.warnings.join(" ")}` : ".");
   }
 
@@ -1799,6 +1932,9 @@
   $("videoPointSize").addEventListener("input", () => {
     videoViewer?.setPointSize(Number($("videoPointSize").value));
   });
+  $("videoBrightness").addEventListener("input", () => videoViewer?.setBrightness($("videoBrightness").value));
+  $("videoRenderMode").addEventListener("change", () => videoViewer?.setRenderMode($("videoRenderMode").value));
+  $("videoFit").addEventListener("click", () => { videoViewer?.cancelFlight(); videoViewer?.fitBounds(); });
   function downloadVideoArtifact(text, filename, type) {
     const url = URL.createObjectURL(new Blob([text], { type }));
     const a = document.createElement("a");
@@ -1817,13 +1953,10 @@
 
   function renderVideoMap(data) {
     const feats = data.features || [];
-    if (!feats.length) {
-      videoMapNote.textContent = "No feature pins — see above.";
-      return;
-    }
     if (!window.L) { videoMapNote.textContent = "Map library unavailable (needs internet)."; return; }
     if (!videoMap) {
-      videoMap = window.L.map("videoMap", { maxZoom: 22 });
+      videoMap = window.L.map("videoMap", { maxZoom: 22 }).setView([20, 0], 2);
+      registerMap("videoMap", videoMap);
       window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
         maxZoom: 22, maxNativeZoom: 19, attribution: "&copy; OpenStreetMap contributors"
       }).addTo(videoMap);
@@ -1850,7 +1983,7 @@
       }
     });
     if (bounds.length > 1) videoMap.fitBounds(bounds, { padding: [20, 20] });
-    else videoMap.setView(bounds[0], 19);
+    else if (bounds.length) videoMap.setView(bounds[0], 19);
     videoMapNote.textContent = `${feats.length} feature(s) from photo ${data.gps_source || "?"} fix` +
       (data.heading_deg != null ? `, heading ${data.heading_deg}°` : "") + ".";
   }
@@ -1862,7 +1995,7 @@
       type: "Feature",
       geometry: f.geom === "line" && f.endpoints
         ? { type: "LineString", coordinates: f.endpoints.map((e) => [e.lon, e.lat]) }
-        : { type: "Point", coordinates: [f.lon, f.lat] },
+        : { type: "Point", coordinates: [(f.snapped || f).lon, (f.snapped || f).lat] },
       properties: f,
     })) };
     const a = document.createElement("a");
@@ -1870,6 +2003,13 @@
     a.download = "microgeographies-video-features.geojson";
     a.click();
     URL.revokeObjectURL(a.href);
+  });
+  $("videoCloudGeoBtn").addEventListener("click", () => {
+    if (!videoCloud || !videoLib) return;
+    const reference = videoData.georeference?.available ? videoData.georeference : null;
+    downloadVideoArtifact(videoLib.buildGeoJson(videoCloud.positions, videoCloud.colors, [], [],
+      videoLib.sampleIndex(videoCloud.count,100), reference), "microgeo-video-cloud.geojson", "application/geo+json");
+    $("exportNote").textContent = reference ? "Exported metric cloud in WGS84 coordinates." : "No GPS/heading alignment: local coordinates exported as properties with null map geometry.";
   });
 
   // Raw detections out of a backend reply, untouched by canvas scaling:
@@ -2377,12 +2517,9 @@
     }
     const cam = currentManual() || (gps ? { lat: gps.lat, lon: gps.lon } : null) || (lastRaw.location || null);
     const pins = boxes.filter((b) => b.geo).map((b) => ({ b, p: effPin(b) })).filter((x) => x.p);
-    if (!cam && !pins.length && !osmData) {
-      mapNote.textContent = "No pins yet — they arrive with the next Send.";
-      return;
-    }
     if (!map) {
-      map = window.L.map("map", { maxZoom: 22 });
+      map = window.L.map("map", { maxZoom: 22 }).setView([20, 0], 2);
+      registerMap("map", map);
       const base = {
         "Streets": window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
           maxZoom: 22, maxNativeZoom: 19, attribution: "&copy; OpenStreetMap contributors"

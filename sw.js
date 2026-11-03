@@ -1,5 +1,5 @@
-const CACHE = "microgeo-v41"; // bump whenever the shell changes, or updates never reach installed users
-const SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./sfm3d.js", "./slam-viewer.js", "./view-navigation.js", "./view-roll.js", "./point-identify.js", "./viewer-annotations.js", "./viewer-navigation.css", "./vendor/three.module.js", "./vendor/three.core.js", "./vendor/OrbitControls.js", "./exif.js", "./sam3local.js", "./mobilenet.js", "./config.js", "./manifest.webmanifest", "./icon.svg"];
+const CACHE = "microgeo-v45"; // bump whenever the shell changes, or updates never reach installed users
+const SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./sfm3d.js", "./viewer-bookmarks.js", "./gaussian-view.js", "./geo-cloud.js", "./vendor/leaflet.js", "./vendor/leaflet.css", "./vendor/images/layers.png", "./vendor/images/layers-2x.png", "./vendor/images/marker-icon.png", "./vendor/images/marker-icon-2x.png", "./vendor/images/marker-shadow.png", "./slam-viewer.js", "./view-navigation.js", "./view-roll.js", "./point-identify.js", "./viewer-annotations.js", "./viewer-navigation.css", "./vendor/three.module.js", "./vendor/three.core.js", "./vendor/OrbitControls.js", "./exif.js", "./sam3local.js", "./mobilenet.js", "./config.js", "./manifest.webmanifest", "./icon.svg"];
 // Pinned separately: the ONNX Runtime Web files (small) live here after
 // first use; the 700 MB SAM weights live in "microgeo-sam3", written by
 // the page itself. Neither is ever precached or wiped with the shell.

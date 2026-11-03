@@ -1,6 +1,58 @@
-# Microgeographies — SAM test PWA
+# MicroGeo Tool — SAM test PWA
 
 ### Reconstruction and viewer update
+
+Version **0.26** compacts the home page and adds small **Home** and
+**Settings** controls in the title bar. All routes share the SAM 3.1 API
+key in Settings and finish with GeoJSON export. Photos use uploaded EXIF
+or manually entered locations; live GPS/compass capture is removed.
+Each workflow has a map and an **Expand map** dialog. Leaflet is bundled
+locally; base-map tiles still need internet access.
+
+The 3D viewers support **WASD** movement, **Q/E** yaw, **Z/C** roll,
+**R/F** rise/lower, **Home** fit, and brightness and point-size controls.
+Click the canvas to use the keys; Shift moves faster. Camera bookmarks
+can be renamed, reordered, deleted or played with 1.4-second glides and
+0.1-second pauses. Only camera poses are stored in browser storage, keyed
+to the loaded cloud, and can be restored when the same cloud is loaded.
+
+Photo-set clouds are aligned to the map with a robust similarity fit
+between registered camera centres and EXIF GPS. At least three distinct,
+non-collinear positions are required; the UI reports the fit RMS and
+whether camera heights were assumed level. Invalid GPS fits leave the
+cloud local. Maps show a sampled top-down cloud overlay (up to 20,000
+points). GeoJSON uses WGS84 after alignment; unaligned points have null
+geometry and retain their local XYZ in properties, avoiding false map
+coordinates. PLY/XYZ retain reconstruction coordinates.
+
+Video retains **DA3NESTED-GIANT-LARGE-1.1** by default. Select
+**Point cloud + Gaussian splatting** before processing to request DA3's
+Gaussian branch, then switch display modes without rebuilding. The web
+renderer uses anisotropic scales, rotations, opacity, depth sorting and
+DC spherical harmonic colour, capped at 100,000 Gaussians. It does not
+evaluate higher-order view-dependent harmonics. This follows the
+[official DA3 inference contract](https://github.com/ByteDance-Seed/Depth-Anything-3/blob/main/docs/API.md).
+The backend must have a recent DA3 installation with Gaussian support
+and enough GPU memory. Mock inference tests exercise the payload and
+renderer; real GPU inference still needs validation on the target host.
+
+Checks: `node --test tests/*.test.mjs`; `.venv-win/Scripts/python -m
+pytest backend/test_georeference.py backend/test_da3.py backend/test_geo.py
+backend/test_sfm_image_isolation.py backend/test_sfm_diagnostics.py -q`.
+With Playwright installed and a static server running on port 9517,
+`node tests/workflows.browser.cjs` exercises all routes, maps, exports,
+keyboard movement, bookmarks and Gaussian rendering with mocked inference.
+Set `BROWSER_CHANNEL=msedge` to use an installed Edge browser.
+
+Version **0.25** renames the app to **MicroGeo Tool** and refines the
+starting page with a larger, centered blue donut menu, finer dotted
+outlines, a central brand mark, and clearer workflow descriptions.
+The responsive layout supports both light and dark themes.
+
+Version **0.24** adds a landing page: a four-quadrant donut where each
+quadrant opens its workflow sub-page (single photo, photo set → pins,
+photo set → 3D, photo + video → DA3 cloud), replacing the top-of-page
+mode picker. Deep links work via `?workflow=<name>`.
 
 Version **0.23** adds a fourth workflow, **Photo + video → DA3 cloud**
 (the mode picker now offers single photo, photo-set points, photo-set
