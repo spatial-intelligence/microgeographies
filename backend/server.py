@@ -45,8 +45,16 @@ from PIL import Image
 
 import depth as geo
 import merge as mg
+import gpu_memory
+from survey_review import router as survey_review_router
+from image_resize import router as image_resize_router
+from location_hint import router as location_hint_router
 
 app = FastAPI()
+app.include_router(survey_review_router)
+app.include_router(image_resize_router)
+app.include_router(location_hint_router)
+app.add_middleware(gpu_memory.GpuJobMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -95,6 +103,15 @@ def health():
         sfm_ok, sfm_how = False, None
     return {"ok": True, "mock": os.getenv("MOCK_SAM") == "1",
             "sfm_available": sfm_ok, "sfm_backend": sfm_how}
+
+
+@app.post("/api/gpu/clear")
+def clear_gpu_memory():
+    from fastapi import HTTPException
+    try:
+        return gpu_memory.clear_models(globals())
+    except gpu_memory.BusyError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @app.post("/api/detect")
@@ -955,6 +972,7 @@ async def sfm(
     from fastapi.responses import StreamingResponse
     log_queue: Queue = Queue()
 
+    @gpu_memory.jobs.track
     def _worker():
         try:
             log_queue.put({"type": "result", "data": job(log_queue.put)})
@@ -1010,6 +1028,7 @@ async def video_cloud(
     filter_black: str = Form(default="0"),
     skip_titles: str = Form(default="1"),
     gaussians: str = Form(default="0"),
+    locate_hint: str = Form(default="0"),
 ):
     """Video workflow: photo (EXIF fix) + short video -> DA3 cloud -> map.
 
@@ -1131,6 +1150,19 @@ async def video_cloud(
                     if effective_fps < sampling_rate * .8:
                         warnings.append(f"Frame budget reduced sampling to {effective_fps:.2f} fps; increase frames for more overlap.")
 
+            if locate_hint == "1" and not location and frames:
+                from location_hint import frame_payload, video_frame_payload
+                try:
+                    try:
+                        sample = video_frame_payload(vpath, 1.0)
+                    except Exception:
+                        closest = min(frames, key=lambda frame: abs(frame.get("time_s", 0) - 1.0) if frame.get("time_s") is not None else float("inf"))
+                        sample = {**frame_payload(closest["path"]), "time_s": closest.get("time_s")}
+                        emit("One-second seek unavailable; using the closest decoded survey frame for the location hint.")
+                    emit({"type": "location_hint_frame", "data": sample})
+                    emit("One frame near one second prepared for a parallel Spark location suggestion; reconstruction continues.")
+                except Exception:
+                    emit("Could not prepare a location sample; reconstruction continues without a location hint.")
             emit(f"Running DA3 on {len(frames)} frames; cloud budget {point_cap} points")
             scene = da3_mod.estimate_scene(frames, emit=emit,
                                            resolution=resolution, infer_gs=gaussians == "1")
@@ -1208,6 +1240,11 @@ async def video_cloud(
                 buffer = io.BytesIO()
                 thumb.save(buffer, format="JPEG", quality=82)
                 source_frames.append({"image": names[i], "time_s": frames[i].get("time_s"),
+                    "detections": [{"label": detection.get("label", ""),
+                                    "box": [value / (image.width if k % 2 == 0 else image.height)
+                                            for k, value in enumerate(detection["box"])]}
+                                   for detection in dets.get(names[i], [])
+                                   if len(detection.get("box", [])) == 4],
                     "url": "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii"),
                     "depth": [round(float(d), 3) if math.isfinite(float(d)) else 0
                               for d in Image.fromarray(scene["depth"][i]).resize((32, 32), Image.Resampling.NEAREST).getdata()]})
@@ -1239,6 +1276,7 @@ async def video_cloud(
     from fastapi.responses import StreamingResponse
     log_queue: Queue = Queue()
 
+    @gpu_memory.jobs.track
     def _worker():
         try:
             log_queue.put({"type": "result", "data": job(log_queue.put)})

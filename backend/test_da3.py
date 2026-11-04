@@ -379,7 +379,7 @@ def test_api_video_cloud_camera_diagnostics_without_codec():
         with patch.object(da3, "extract_frames", side_effect=extracted):
             data = _post_zip(TestClient(server.app),
                              [("photo.jpg", _photo_bytes()), ("clip.mp4", b"stub")],
-                             max_frames="24", max_points="1000")
+                             max_frames="24", max_points="1000", concepts='["door"]')
     assert "error" not in data, data
     assert len(data["cameras"]) == 2
     assert len(data["cameras"][0]["qvec"]) == 4
@@ -387,6 +387,9 @@ def test_api_video_cloud_camera_diagnostics_without_codec():
     assert data["diagnostics"]["device"] == "mock"
     assert data["diagnostics"]["frame_limit"] == 24
     assert data["diagnostics"]["point_limit"] == 1000
+    assert all(frame["detections"] for frame in data["source_frames"])
+    assert all(d["label"] == "door" and len(d["box"]) == 4 and all(0 <= v <= 1 for v in d["box"])
+               for frame in data["source_frames"] for d in frame["detections"])
     assert data["diagnostics"]["points_before_cap"] >= data["total_points"]
 
 

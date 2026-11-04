@@ -25,7 +25,7 @@
     }});
   }
   function reconstructionPhotos(data){return data.source_frames||Object.entries(data.thumbnails||{}).map(([image,url])=>({image,url}));}
-  function geometrySummary(detail){const i=detail.info;if(!i)return '';let text=detail.mode==='tin'?`${i.triangles.toLocaleString()} triangles / ${i.meshVertices.toLocaleString()} vertices - smaller Point Size makes a finer TIN.`:detail.mode==='mosaic'?`${i.photos} / ${i.photoTotal} source photos${i.planarPhotos?' / '+i.planarPhotos+' photo planes at estimated scene depth':''}.`:`${i.original.toLocaleString()} original + ${i.synthetic.toLocaleString()} synthetic points (?${(i.synthetic/Math.max(1,i.original)).toFixed(1)} added).${i.requested>i.target?' Preview capped at 2 million added points.':''} Picking and exports use original samples.`;if(i.busy)text+=' Building preview...';if(i.error)text+=' '+i.error;return text;}
+  function geometrySummary(detail){const i=detail.info;if(!i)return '';let text=detail.mode==='tin'?`${i.triangles.toLocaleString()} triangles / ${i.meshVertices.toLocaleString()} vertices - smaller Point Size makes a finer TIN.`:detail.mode==='mosaic'?`${i.photos} / ${i.photoTotal} source photos${i.planarPhotos?' / '+i.planarPhotos+' photo planes at estimated scene depth':''}.`:`${i.original.toLocaleString()} original + ${i.synthetic.toLocaleString()} synthetic points (x${(i.synthetic/Math.max(1,i.original)).toFixed(1)} added).${i.requested>i.target?' Preview capped at 2 million added points.':''} Picking and exports use original samples.`;if(i.busy)text+=' Building preview...';if(i.error)text+=' '+i.error;return text;}
   function registerMap(id, instance) {
     overviewMaps.set(id, instance);
     window.MGMaps.addBasemaps(instance, id);
@@ -208,6 +208,26 @@
   if (cfgBtn) cfgBtn.addEventListener("click", () => openDlg(cfgDlg));
   if (locBtn) locBtn.addEventListener("click", () => openDlg(locDlg));
   if (cfgClose) cfgClose.addEventListener("click", () => cfgDlg.close());
+  $("clearGpuBtn").addEventListener("click", async () => {
+    const button = $("clearGpuBtn"), status = $("clearGpuStatus");
+    button.disabled = true;
+    status.classList.remove("status-error");
+    status.textContent = "Clearing backend GPU memory…";
+    try {
+      const response = await fetch("/api/gpu/clear", {method: "POST"});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.detail ||
+        (response.status === 404 ? "Restart the backend to enable GPU memory cleanup." : "Could not clear GPU memory."));
+      status.textContent = data.cuda_available
+        ? `GPU models unloaded. Released ${(data.released_bytes / 1048576).toFixed(0)} MB; ${(data.reserved_bytes / 1048576).toFixed(0)} MB still reserved by the backend. Models reload on the next run.`
+        : "Backend models unloaded. No active CUDA allocations to clear.";
+    } catch (error) {
+      status.classList.add("status-error");
+      status.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
   if (locClose) locClose.addEventListener("click", () => { locDlg.close(); refreshLocState(); });
   const mapDialog = $("mapDialog");
   let expandedMap = null;
@@ -919,6 +939,8 @@
   // the two routes that need pins (single photo, batch); the 3D route
   // is COLMAP geometry with depth-free labels.
   const MODES = {
+    "image-resize": {sections:["secResize"],title:"Resize image ZIP",
+      note:"Downsize photos and download a resized ZIP.",blurb:"Resize photos while retaining EXIF/GPS metadata."},
     "region-download": { sections: ["secRegion"], title: "Download region GeoJSON",
       note: "Download OpenStreetMap features for the visible region.",
       blurb: "Export buildings, entrances, roads, paths and other mapped features." },
@@ -965,7 +987,7 @@
     const vis = MODES[mode].sections;
     let n = 0;
     ["secPhoto", "secObjects", "secDetector", "secResults", "secMatch", "secStage",
-     "secSet", "secSetObjects", "secSetProcess", "secSetResults", "secSfm", "secVideo", "secExport", "secRegion"].forEach((id) => {
+     "secSet", "secSetObjects", "secSetProcess", "secSetResults", "secSfm", "secVideo", "secExport", "secRegion", "secResize"].forEach((id) => {
       const sec = $(id);
       if (!sec) return;
       const show = vis.indexOf(id) >= 0;
@@ -994,6 +1016,8 @@
     $("videoOnlyRow").hidden = !surveyMode;
     $("videoSurveyIntro").hidden = !surveyMode;
     $("videoSurveyTools").hidden = !surveyMode;
+    $("videoLocateRow").hidden = $("videoLocateHintNote").hidden = !surveyMode;
+    if(!surveyMode){$("videoLocationHints").close?.();$("videoLocationHintsBar").hidden=true;}
     $("videoZip").closest("label").hidden = surveyMode;
     $("videoZip").closest(".card").querySelector("p.hint").hidden = surveyMode;
     ["videoConcepts", "videoDetector"].forEach(id => $(id).closest("label").hidden = surveyMode && !$("videoUseSam").checked);
@@ -1011,7 +1035,7 @@
     workflowTitle = $("workflowTitle"), workflowBlurb = $("workflowBlurb"),
     backBtn = $("backBtn");
   const ALL_SECTIONS = ["secPhoto", "secObjects", "secDetector", "secResults", "secMatch", "secStage",
-    "secSet", "secSetObjects", "secSetProcess", "secSetResults", "secSfm", "secVideo", "secExport", "secRegion"];
+    "secSet", "secSetObjects", "secSetProcess", "secSetResults", "secSfm", "secVideo", "secExport", "secRegion", "secResize"];
   function paintWorkflowNav(mode) {
     if (workflowTitle) workflowTitle.textContent = MODES[mode].title;
     if (workflowBlurb) workflowBlurb.textContent = MODES[mode].blurb;
@@ -1050,6 +1074,7 @@
         openWorkflow("single");
       });
       initWorkflowMaps(mode);
+      if(mode==='video-survey')locationHints.refresh();
       if (mode.startsWith("set-") && mode !== "set-video") setMapSource(mode === "set-3d" ? "model" : "photos");
     });
     const nav = (opts && opts.push === false) ? "replaceState" : "pushState";
@@ -1546,8 +1571,8 @@
 
   $("sfmView").addEventListener('viewer-tool-change',e=>{sfmToolButton('toolOrbit',e.detail.tool==='orbit');sfmToolButton('toolIdentify',e.detail.tool==='identify');});
   $("sfmRenderMode").onchange=()=>sfmViewer?.setRenderMode($("sfmRenderMode").value);
-  $("sfmDensify").oninput=()=>{ $("sfmDensifyVal").textContent='?'+$("sfmDensify").value;sfmViewer?.setDensify($("sfmDensify").value);};
-  $("sfmView").addEventListener('viewer-display-change',e=>{const d=e.detail;$("sfmRenderMode").value=d.mode;$("sfmDensify").value=d.densify;$("sfmDensifyVal").textContent='?'+d.densify;$("sfmDensify").disabled=d.mode!=='points';$("sfmGeometryInfo").textContent=geometrySummary(d);});
+  $("sfmDensify").oninput=()=>{ $("sfmDensifyVal").textContent='x'+$("sfmDensify").value;sfmViewer?.setDensify($("sfmDensify").value);};
+  $("sfmView").addEventListener('viewer-display-change',e=>{const d=e.detail;$("sfmRenderMode").value=d.mode;$("sfmDensify").value=d.densify;$("sfmDensifyVal").textContent='x'+d.densify;$("sfmDensify").disabled=d.mode!=='points';$("sfmGeometryInfo").textContent=geometrySummary(d);});
   // SAM stage box: the per-image boxes that fed 3D label voting,
   // shown before the 3D view. data.detections maps image name (or
   // basename) to [{label, box, score}]. Every box is listed with its
@@ -1903,6 +1928,11 @@
     videoMapNote = $("videoMapNote");
   let videoViewer = null, videoSecondViewer = null, videoLib = null, videoMap = null, videoMarkers = null;
   let videoData = null, videoCloud = null;
+  let videoHintsForCurrentData=true;
+  const locationHints=window.MGLocationHints.create({getMap:()=>videoMap,getData:()=>videoData,
+    isSurvey:()=>document.body.dataset.mode==='video-survey',
+    getVideoFile:()=>$('videoOnly').files[0],getToken:()=>tokenInput.value.trim(),
+    onChange:value=>{if(videoHintsForCurrentData&&videoData)videoData.location_hint=value;}});
   // A single Settings key is shared immediately across every API workflow.
   videoToken.value = tokenInput.value;
   [tokenInput, setApiToken, videoToken].forEach(input => input.addEventListener("input", () => {
@@ -1920,7 +1950,7 @@
     videoTokenRow.hidden = true;
   });
 
-  async function readNdjson(res, onLog) {
+  async function readNdjson(res, onLog, onEvent) {
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "", result = null;
@@ -1935,6 +1965,7 @@
         const m = JSON.parse(line);
         if (m.type === "log" && onLog) onLog(m.line);
         else if (m.type === "result") result = m.data;
+        else if(onEvent)onEvent(m);
       }
       if (done) break;
     }
@@ -1950,6 +1981,8 @@
       openDlg(cfgDlg); videoOut.textContent = "Enter your SAM 3.1 API key in Settings."; return;
     }
     const parsed = useLabels ? parsePrompts(videoConcepts.value) : [];
+    const hintToken=tokenInput.value.trim();
+    videoHintsForCurrentData=false;locationHints.reset();
     const fd = new FormData();
     fd.append(surveyMode ? "video" : "zipfile", zf);
     fd.append("concepts", JSON.stringify(parsed.map((p) => p.name)));
@@ -1961,6 +1994,7 @@
     fd.append("consistency", $("videoConsistency").checked ? "1" : "0");
     fd.append("filter_black", $("videoFilterBlack").checked ? "1" : "0");
     fd.append("skip_titles", $("videoSkipTitles").checked ? "1" : "0");
+    fd.append("locate_hint", surveyMode&&$("videoLocateHint").checked ? "1" : "0");
     geomsField(fd, geomsMap(parsed));
     fd.append("detector", videoDetector.value || "sam");
     if (videoDetector.value === "api") fd.append("sam_token", tokenInput.value.trim());
@@ -1980,10 +2014,10 @@
       const data = await readNdjson(res, (line) => {
         videoLog.textContent += line + "\n";
         videoLog.scrollTop = videoLog.scrollHeight;
-      });
+      },message=>{if(surveyMode&&message.type==='location_hint_frame')void locationHints.locate(message.data.url,hintToken,message.data.time_s);});
       if (!data) throw new Error("the video stream ended before any result arrived");
       if (data.error) throw new Error(data.error);
-      videoData = data;
+      data.location_hint=locationHints.snapshot();videoData = data;videoHintsForCurrentData=true;
       await renderVideoResult(data);
       await attachVideoSurvey();
     } catch (e) {
@@ -2039,6 +2073,7 @@
     videoSecondViewer.setBrightness($("videoBrightness").value);
     videoSecondViewer.setPreset($("videoSecondPreset").value);
     videoSecondViewer.setCameraSettings({metric:!!data.metric,depthScale:data.georeference?.scale_m_per_unit||1,depthMin:0,depthMax:Infinity});
+    videoSecondViewer.setLinkedCamera({getPose:()=>videoViewer?.getPose(),onChange:pose=>videoViewer?.flyTo(pose,1)});
     $("videoSecondEmpty").hidden = true;
     document.body.classList.add("has-video-cloud");
     if(currentMode()==="video-survey") $("videoSetup").open=false;
@@ -2100,8 +2135,10 @@
           if (!videoMap) return;
           if (!surveyMarkers) surveyMarkers = window.L.layerGroup().addTo(videoMap);
           surveyMarkers.clearLayers();
-          features.forEach((f,i) => {const text=document.createElement("span");text.textContent=`${f.properties.name} / ${f.properties.indoor ? "Indoor / floor " + f.properties.floor : "Outdoor"}`;
-            const marker=window.L.marker([f.geometry.coordinates[1],f.geometry.coordinates[0]],{draggable:true,icon:window.L.divIcon({className:'survey-tag-marker',html:'',iconSize:[14,14]})}).addTo(surveyMarkers).bindTooltip(text);
+          features.forEach((f,i) => {if(!f.geometry?.coordinates)return;const text=document.createElement("span");text.textContent=`${f.properties.name} / ${f.properties.indoor ? "Indoor / floor " + f.properties.floor : "Outdoor"}`;
+            const isReview=f.properties.feature_type==='image_question';
+            const marker=window.L.marker([f.geometry.coordinates[1],f.geometry.coordinates[0]],{draggable:!isReview,icon:window.L.divIcon({className:isReview?'survey-review-marker':'survey-tag-marker',html:'',iconSize:[14,14]})}).addTo(surveyMarkers).bindTooltip(text);
+            if(isReview){const answer=document.createElement('pre');answer.textContent=JSON.stringify(f.properties.spark_answer,null,2);marker.bindPopup(answer);return;}
             marker.on('click',()=>videoSurvey.editTag(i));marker.on('dragend',()=>{const p=marker.getLatLng();videoSurvey.moveTag(i,p.lat,p.lng);});});
         }});
     }
@@ -2113,8 +2150,8 @@
     videoSecondViewer?.setCamerasVisible($("videoShowCameras").checked);
   });
   [$("videoView"),$("videoSecondView")].forEach(host=>host.addEventListener('viewer-tool-change',e=>{if(currentMode()==='video-survey'&&videoSurvey)videoSurvey.setTool(e.detail.tool);else [videoViewer,videoSecondViewer].forEach(view=>view?.setTool(e.detail.tool));}));
-  $("videoDensify").oninput=()=>{const multiplier=$("videoDensify").value;$("videoDensifyVal").textContent='?'+multiplier;videoViewer?.setDensify(multiplier);videoSecondViewer?.setDensify(multiplier);};
-  $("videoView").addEventListener('viewer-display-change',e=>{const d=e.detail;$("videoRenderMode").value=d.mode;$("videoDensify").value=d.densify;$("videoDensifyVal").textContent='?'+d.densify;$("videoDensify").disabled=d.mode!=='points';$("videoGeometryInfo").textContent=geometrySummary(d);});
+  $("videoDensify").oninput=()=>{const multiplier=$("videoDensify").value;$("videoDensifyVal").textContent='x'+multiplier;videoViewer?.setDensify(multiplier);videoSecondViewer?.setDensify(multiplier);};
+  $("videoView").addEventListener('viewer-display-change',e=>{const d=e.detail;$("videoRenderMode").value=d.mode;$("videoDensify").value=d.densify;$("videoDensifyVal").textContent='x'+d.densify;$("videoDensify").disabled=d.mode!=='points';$("videoGeometryInfo").textContent=geometrySummary(d);});
   $("videoPointSize").addEventListener("input", () => {
     videoViewer?.setPointSize(Number($("videoPointSize").value));
     videoSecondViewer?.setPointSize(Number($("videoPointSize").value));
@@ -2134,7 +2171,7 @@
   $("videoSecondPreset").addEventListener("change", () => videoSecondViewer?.setPreset($("videoSecondPreset").value));
   $("videoSecondCopy").addEventListener("click", () => {const pose=videoViewer?.getPose();if(pose)videoSecondViewer?.flyTo(pose,300);});
   let currentVideoProjectId=null,currentVideoProjectName='',projectStatusTimer=null;
-  const projectSettingIds=['videoColorMode','videoBrightness','videoShowCameras','videoSecondPreset','videoPointSize','videoRenderMode','videoDensify','videoOutput','videoConcepts','videoDetector','videoMaxFrames','videoMaxPoints','videoSampleFps','videoResolution','videoUseSam','videoConsistency','videoFilterBlack','videoSkipTitles'];
+  const projectSettingIds=['videoColorMode','videoBrightness','videoShowCameras','videoSecondPreset','videoPointSize','videoRenderMode','videoDensify','videoOutput','videoConcepts','videoDetector','videoMaxFrames','videoMaxPoints','videoSampleFps','videoResolution','videoUseSam','videoConsistency','videoFilterBlack','videoSkipTitles','videoLocateHint'];
   function videoProjectSettings(){return Object.fromEntries(projectSettingIds.map(id=>{const el=$(id);return [id,el.type==='checkbox'?el.checked:el.value];}));}
   function restoreVideoProjectSettings(settings){for(const [id,value] of Object.entries(settings||{})){if(!projectSettingIds.includes(id))continue;const el=$(id);if(el.type==='checkbox')el.checked=!!value;else el.value=value;}$("videoUseSam").dispatchEvent(new Event('change'));}
   async function projectStore(){return (await import('./project-store.js')).projectStore;}
@@ -2177,7 +2214,8 @@
       if(project.settings?.videoDensify!==undefined)project.settings.videoDensify=Number(project.settings.videoDensify)/100;
       for(const view of project.views||[])if(view.settings?.densify!==undefined)view.settings.densify=Number(view.settings.densify)/100;
     }
-    dockVideoOverview();restoreVideoProjectSettings(project.settings);videoData=project.data;await renderVideoResult(videoData);await attachVideoSurvey();videoSurvey.restore(project.survey);
+    videoHintsForCurrentData=false;locationHints.restore(project.data.location_hint);videoData=project.data;videoHintsForCurrentData=true;
+    dockVideoOverview();restoreVideoProjectSettings(project.settings);await renderVideoResult(videoData);await attachVideoSurvey();videoSurvey.restore(project.survey);
     for(const [i,view] of [videoViewer,videoSecondViewer].entries()){if(project.views?.[i]?.settings)view.setCameraSettings(project.views[i].settings);if(project.views?.[i]?.pose)await view.flyTo(project.views[i].pose,1);}
     if(project.map)videoMap.setView(project.map.center,project.map.zoom);if(project.overview?.floating)await floatVideoOverview(project.overview.layout);
     currentVideoProjectId=id;currentVideoProjectName=project.name;await refreshVideoProjects();projectStatus('Loaded '+project.name+'.');
@@ -2237,6 +2275,7 @@
     else if (bounds.length) videoMap.setView(bounds[0], 19);
     videoMapNote.textContent = `${feats.length} feature(s) from photo ${data.gps_source || "?"} fix` +
       (data.heading_deg != null ? `, heading ${data.heading_deg}°` : "") + ".";
+    locationHints.refresh();
   }
 
   videoExportBtn.addEventListener("click", () => {

@@ -1,6 +1,6 @@
 {
-  "name": "MicroGeo Tool",
-  "short_name": "MicroGeo Tool",
+  "name": "MicroGeog Mapper",
+  "short_name": "MicroGeog Mapper",
   "description": "Turn photos and video into mapped features and 3D point clouds.",
   "start_url": "./index.html",
   "scope": "./",

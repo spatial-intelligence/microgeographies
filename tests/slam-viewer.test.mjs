@@ -33,7 +33,8 @@ function load(path,names){
 Object.assign(context,load('../vendor/OrbitControls.js',['OrbitControls']));
 Object.assign(context,load('../view-navigation.js',['createViewNavigation']));
 Object.assign(context,load('../view-roll.js',['createViewRoll']));
-Object.assign(context,load('../point-identify.js',['attachPointIdentify']));
+Object.assign(context,load('../point-identify.js',['attachPointIdentify','formatIdentifyText']));
+Object.assign(context,load('../viewer-camera-marker.js',['createMainCameraMarker','translateCameraPose','aimCameraPose']));
 Object.assign(context,load('../viewer-class-legend.js',['classLegendEntries','createClassLegend']));
 Object.assign(context,load('../cloud-representations.js',['createCloudRepresentations']));
 Object.assign(context,load('../viewer-camera-controls.js',['createViewerCameraControls']));

@@ -46,7 +46,7 @@ function reconstruction() {
       return route.fulfill({contentType:'application/x-ndjson',body:JSON.stringify({type:'result',data:fixture})+'\n'});
     });
     await page.goto(process.env.TEST_URL || 'http://127.0.0.1:9517',{waitUntil:'networkidle'});
-    assert.equal(await page.title(),'MicroGeo Tool v0.38');
+    assert.equal(await page.title(),'MicroGeog Mapper v0.42');
     assert.equal(await page.getByText('Your world, mapped in detail.').count(),0);
     await page.locator('#settingsBtn').click(); await page.locator('#tokenInput').fill('test-key-only');
     await page.locator('#endpointInput').fill('/api/sam');

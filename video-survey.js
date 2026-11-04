@@ -1,5 +1,7 @@
 import {createToolWindow} from './floating-windows.js';
 import {geographicPoint} from './geo-cloud.js';
+import {createSurveyReview} from './survey-review.js';
+import {newItemId} from './labelled-items.js';
 
 export function cameraRotation(camera) {
   const [w,x,y,z]=camera?.qvec || [1,0,0,0];
@@ -67,7 +69,7 @@ export function createVideoSurvey({host,getContext,onReference,onTags}) {
     <section id="surveyMeasurePanel"><p>Click two cloud points in either view. The segment and distance appear in both views.</p><button id="surveyClearMeasure">Clear measurement</button></section>
     <section id="surveyTagPanel"><p>Click a cloud point to create a tag, or choose Edit on an existing tag. Map tags can also be dragged or clicked to edit.</p>
       <form id="surveyTagForm" hidden><label>Name / type<input id="surveyTagName" required maxlength="160" placeholder="Printer, bin, office"></label>
-      <div class="coordinate-fields"><label>Latitude<input id="surveyTagLat" type="number" min="-85" max="85" step="any" required></label><label>Longitude<input id="surveyTagLon" type="number" min="-180" max="180" step="any" required></label></div>
+      <div class="coordinate-fields" id="surveyTagCoords"><label>Latitude<input id="surveyTagLat" type="number" min="-85" max="85" step="any" required></label><label>Longitude<input id="surveyTagLon" type="number" min="-180" max="180" step="any" required></label></div>
       <label>Location<select id="surveyIndoor"><option value="outdoor">Outdoor</option><option value="indoor">Indoor</option></select></label>
       <label id="surveyFloorRow" hidden>Floor level<input id="surveyFloor" type="number" step="1" value="0"></label>
       <button type="submit">Save POINT</button></form><ul id="surveyTags"></ul>
@@ -83,6 +85,9 @@ export function createVideoSurvey({host,getContext,onReference,onTags}) {
       left:Math.max(12,innerWidth-(key==='photos'?440:430)),top:key==='photos'?110:Math.max(90,innerHeight*.52),className:'survey-window'});
   }
   const status=text=>{$('surveyStatus').textContent=text;};
+  const review=createSurveyReview({host,getContext,getTags:()=>tags,
+    getFrames:local=>{const ctx=getContext();return relevantFrames(local,ctx.data.cameras||[],ctx.data.source_frames||[]);},
+    onChange:()=>publishTags()});
   function eachViewer(action){const ctx=getContext();(ctx.viewers || [ctx.viewer]).filter(Boolean).forEach(action);}
   function overlay(){
     const points=[...controls.map((c,i)=>({index:c.index,number:i+1,controlId:!editing&&['control','orbit'].includes(tool)?i:undefined,pending:editing?.index===i})),
@@ -127,40 +132,46 @@ export function createVideoSurvey({host,getContext,onReference,onTags}) {
     }));overlay();
   }
   function invalidate(){
+    review.invalidate();
     if(getContext().data?.georeference?.method?.startsWith('Manual')){onReference({available:false,reason:'Control points changed; register again.'});onTags([]);}
     measurement=[];eachViewer(viewer=>viewer.setMeasurement([]));$('surveyExport').disabled=true;
   }
   $('surveyCancelEdit').onclick=()=>{cancelEdit();renderControls();status('Point edit cancelled.');};
   $('surveyUndo').onclick=()=>{if(pending){cancelEdit();renderControls();status('Pending control point cancelled.');return;}if(controls.length)removeControl(controls.length-1);};
-  function register(){try{const ctx=getContext();if(!ctx.cloud)throw Error('Build a cloud first.');const value=$('surveyAltitude').value,ref=fitMapControls(controls,ctx.data.cameras?.[0],value===''?null:Number(value));onReference(ref);renderControls();publishTags();status(`Registered ${controls.length} pairs · horizontal RMS ${ref.rms_m.toFixed(2)} m · scale ${ref.scale_m_per_unit.toFixed(4)} m/unit. ${ref.altitude_known?'Surveyed elevation used.':'Heights are relative to control point 1.'}`);}catch(e){status(e.message);}}
+  function register(){try{const ctx=getContext();if(!ctx.cloud)throw Error('Build a cloud first.');const value=$('surveyAltitude').value,ref=fitMapControls(controls,ctx.data.cameras?.[0],value===''?null:Number(value));onReference(ref);review.invalidate();renderControls();publishTags();status(`Registered ${controls.length} pairs · horizontal RMS ${ref.rms_m.toFixed(2)} m · scale ${ref.scale_m_per_unit.toFixed(4)} m/unit. ${ref.altitude_known?'Surveyed elevation used.':'Heights are relative to control point 1.'}`);}catch(e){status(e.message);}}
   $('surveyRegister').onclick=register;
   $('surveyAltitude').oninput=()=>{invalidate();status('Elevation changed. Register again to update coordinates.');};
   $('surveyClearMeasure').onclick=()=>{measurement=[];eachViewer(viewer=>viewer.setMeasurement([]));status('Measurement cleared.');};
   $('surveyIndoor').onchange=()=>{$('surveyFloorRow').hidden=$('surveyIndoor').value!=='indoor';$('surveyFloor').required=$('surveyIndoor').value==='indoor';};
-  function features(){const ref=getContext().data?.georeference;if(!ref?.available)return [];return tags.map(t=>{const coordinates=geographicPoint(new Float64Array(t.local),0,ref);if(!ref.altitude_known)coordinates.pop();return {type:'Feature',geometry:{type:'Point',coordinates},properties:{...t,altitude_reference:ref.altitude_known?'surveyed':'relative to control point 1',relative_height_m:geographicPoint(new Float64Array(t.local),0,ref)[2]-(ref.origin.altitude_m||0)}};});}
+  function features(){const ref=getContext().data?.georeference;return [...tags.map(t=>{const coordinates=ref?.available?geographicPoint(new Float64Array(t.local),0,ref):null;if(coordinates&&!ref.altitude_known)coordinates.pop();return {type:'Feature',geometry:coordinates?{type:'Point',coordinates}:null,properties:{...t,local_xyz:t.local,altitude_reference:!ref?.available?'unregistered':ref.altitude_known?'surveyed':'relative to control point 1',relative_height_m:ref?.available?geographicPoint(new Float64Array(t.local),0,ref)[2]-(ref.origin.altitude_m||0):null}};}),...review.features()];}
   function publishTags(){
-    overlay();onTags(features());$('surveyExport').disabled=!getContext().data?.georeference?.available;
-    $('surveyTags').replaceChildren(...tags.map((t,i)=>{const li=document.createElement('li');li.textContent=`${t.name} - ${t.indoor?'Indoor / floor '+t.floor:'Outdoor'} `;
+    review.refreshClasses();
+    overlay();onTags(features());$('surveyExport').disabled=!getContext().cloud;
+    $('surveyTags').replaceChildren(...tags.map((t,i)=>{const li=document.createElement('li');li.textContent=`${t.name} · ID ${t.item_id||'unassigned'} - ${t.indoor?'Indoor / floor '+t.floor:'Outdoor'} `;
       const edit=document.createElement('button');edit.textContent='Edit';edit.onclick=()=>editTag(i);
-      const remove=document.createElement('button');remove.textContent='Delete';remove.onclick=()=>{tags.splice(i,1);publishTags();};li.append(edit,remove);return li;}));
+      const remove=document.createElement('button');remove.textContent='Delete';remove.onclick=()=>{tags.splice(i,1);review.invalidate();publishTags();};li.append(edit,remove);return li;}));
   }
+  function detectedTags(){const ctx=getContext();return review.items().filter(item=>!item.manual).map(item=>({name:item.label,item_id:item.item_id,local:[...item.local],point_index:item.point_index,indoor:false,floor:null,detected:true,
+    source:ctx.data?.detector==='api'?'SAM 3.1 API':'Detected cloud label',aggregation:'labelled item'}));}
   function openTagForm(tag,index=null){
     editingTag=index;selected={index:tag.point_index,local:[...tag.local]};
-    const coords=geographicPoint(new Float64Array(tag.local),0,getContext().data.georeference);
-    $('surveyTagName').value=tag.name||'';$('surveyTagLat').value=coords[1];$('surveyTagLon').value=coords[0];
+    const ref=getContext().data?.georeference,coords=ref?.available?geographicPoint(new Float64Array(tag.local),0,ref):null;
+    $('surveyTagCoords').hidden=!coords;
+    for(const id of ['surveyTagLat','surveyTagLon']){$(id).disabled=!coords;$(id).required=!!coords;}
+    $('surveyTagName').value=tag.name||'';$('surveyTagLat').value=coords?.[1]??'';$('surveyTagLon').value=coords?.[0]??'';
     $('surveyIndoor').value=tag.indoor?'indoor':'outdoor';$('surveyFloor').value=tag.floor??0;$('surveyIndoor').onchange();
     $('surveyTagForm').hidden=false;windows.tag.show();$('surveyTagName').focus({preventScroll:true});
   }
-  function editTag(index){if(!tags[index])return;if(!getContext().data?.georeference?.available){status('Register the cloud before editing world positions.');return;}setTool('tag');openTagForm(tags[index],index);}
-  function moveTag(index,lat,lon){const ref=getContext().data?.georeference;if(!ref?.available||!tags[index])return;tags[index].local=localPointFromMap(lon,lat,tags[index].local,ref);publishTags();status('Tag position updated.');}
+  function editTag(index){if(!tags[index])return;setTool('tag');openTagForm(tags[index],index);}
+  function moveTag(index,lat,lon){const ref=getContext().data?.georeference;if(!ref?.available||!tags[index])return;tags[index].local=localPointFromMap(lon,lat,tags[index].local,ref);review.invalidate();publishTags();status('Tag position updated.');}
   $('surveyTagForm').onsubmit=e=>{
     e.preventDefault();const ref=getContext().data?.georeference;
-    if(!selected||!ref?.available){status('Register the cloud before saving world-coordinate tags.');return;}
+    if(!selected){status('Choose a cloud point before saving a tag.');return;}
     const name=$('surveyTagName').value.trim();if(!name)return;
-    const indoor=$('surveyIndoor').value==='indoor',tag={name,indoor,floor:indoor?Number($('surveyFloor').value):null,
-      local:localPointFromMap(Number($('surveyTagLon').value),Number($('surveyTagLat').value),selected.local,ref),point_index:selected.index,source:'DA3 video cloud'};
+    const indoor=$('surveyIndoor').value==='indoor',tag={name,item_id:editingTag===null?newItemId():(tags[editingTag].item_id||newItemId()),indoor,floor:indoor?Number($('surveyFloor').value):null,
+      local:ref?.available?localPointFromMap(Number($('surveyTagLon').value),Number($('surveyTagLat').value),selected.local,ref):[...selected.local],point_index:selected.index,source:'DA3 video cloud'};
     if(editingTag===null)tags.push(tag);else tags[editingTag]=tag;
-    editingTag=null;publishTags();$('surveyTagForm').hidden=true;status('World-coordinate POINT saved.');
+    editingTag=null;review.invalidate();publishTags();$('surveyTagForm').hidden=true;status(ref?.available?'World-coordinate POINT saved.':'Local POINT saved. Georeferencing later will supply map coordinates.');
   };
   $('surveyExport').onclick=()=>{const blob=new Blob([JSON.stringify({type:'FeatureCollection',features:features(),georeference:getContext().data.georeference},null,2)],{type:'application/geo+json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='microgeo-video-survey.geojson';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
   function showPhoto(){const f=photos[photoIndex];$('surveyPhoto').hidden=!f;$('surveyCrosshair').hidden=!f;$('surveyPrev').disabled=$('surveyNext').disabled=photos.length<2;$('surveyPhotoInfo').textContent=f?`${photoIndex+1} / ${photos.length} · ${f.image}${f.time_s!=null?' · '+f.time_s.toFixed(2)+' s':''}`:'No sampled frames view this selection. Try a larger region.';if(f){$('surveyPhoto').src=f.url;$('surveyCrosshair').style.left=`${Math.max(0,Math.min(1,f.u))*100}%`;$('surveyCrosshair').style.top=`${Math.max(0,Math.min(1,f.v))*100}%`;}}
@@ -169,30 +180,33 @@ export function createVideoSurvey({host,getContext,onReference,onTags}) {
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&(editing||pending)&&!host.hidden&&!host.closest('[hidden]')){cancelEdit();renderControls();status('Point edit cancelled.');return;}if(host.hidden||host.closest('[hidden]')||tool!=='photos'||/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)||e.target.isContentEditable)return;if([',','<','.','>'].includes(e.key)){e.preventDefault();browse([',','<'].includes(e.key)?-1:1);}});
   function findPhotos(){windows.photos.show();if(!selected)return;const ctx=getContext(),scale=ctx.data.georeference?.scale_m_per_unit||1;photos=relevantFrames(selected.local,ctx.data.cameras||[],ctx.data.source_frames||[],Math.max(0,Number($('surveyRadius').value)||0)/scale);photoIndex=0;showPhoto();}
   $('surveyRadius').oninput=findPhotos;
-  function pick(index){const ctx=getContext(),local=Array.from(ctx.cloud.positions.subarray(index*3,index*3+3));selected={index,local};if(tool==='control'){if(editing){if(editing.side!=='cloud'){status('Click the map to move this control, or cancel the edit.');return;}const i=editing.index;controls[i]={...controls[i],index,local};cancelEdit();changed(`3D position for control ${i+1} moved.`);return;}pending=selected;overlay();status(`Control ${controls.length+1} selected. Click its matching map location.`);}else if(tool==='measure'){if(measurement.length===2)measurement=[];measurement.push(index);eachViewer(viewer=>viewer.setMeasurement(measurement,ctx.data.georeference?.scale_m_per_unit||1));if(measurement.length===2){const p=ctx.cloud.positions,d=Math.hypot(...local.map((v,k)=>v-p[measurement[0]*3+k])),scale=ctx.data.georeference?.scale_m_per_unit;status(`Distance: ${(d*(scale||1)).toFixed(3)} ${scale||ctx.data.metric?'m':'local units'}${scale?' (registered scale)':''}`);}else status('Click the second endpoint.');}else if(tool==='tag'){if(!ctx.data.georeference?.available){status('Register the cloud before creating world-coordinate tags.');return;}openTagForm({point_index:index,local,name:'',indoor:false,floor:0});}else if(tool==='photos')findPhotos();}
+  function pick(index){const ctx=getContext(),local=Array.from(ctx.cloud.positions.subarray(index*3,index*3+3));selected={index,local};if(tool==='control'){if(editing){if(editing.side!=='cloud'){status('Click the map to move this control, or cancel the edit.');return;}const i=editing.index;controls[i]={...controls[i],index,local};cancelEdit();changed(`3D position for control ${i+1} moved.`);return;}pending=selected;overlay();status(`Control ${controls.length+1} selected. Click its matching map location.`);}else if(tool==='measure'){if(measurement.length===2)measurement=[];measurement.push(index);eachViewer(viewer=>viewer.setMeasurement(measurement,ctx.data.georeference?.scale_m_per_unit||1));if(measurement.length===2){const p=ctx.cloud.positions,d=Math.hypot(...local.map((v,k)=>v-p[measurement[0]*3+k])),scale=ctx.data.georeference?.scale_m_per_unit;status(`Distance: ${(d*(scale||1)).toFixed(3)} ${scale||ctx.data.metric?'m':'local units'}${scale?' (registered scale)':''}`);}else status('Click the second endpoint.');}else if(tool==='tag'){openTagForm({point_index:index,local,name:'',indoor:false,floor:0});}else if(tool==='photos')findPhotos();}
   return {
     editTag,moveTag,setTool,
-    snapshot(){return structuredClone({controls,tags,measurement,altitude:$('surveyAltitude').value,liveRefine:$('surveyLiveRefine').checked,windows:Object.fromEntries(Object.entries(windows).map(([k,v])=>[k,v.getLayout()]))});},
+    snapshot(){return structuredClone({controls,tags,measurement,review:review.snapshot(),altitude:$('surveyAltitude').value,liveRefine:$('surveyLiveRefine').checked,windows:Object.fromEntries(Object.entries(windows).map(([k,v])=>[k,v.getLayout()]))});},
     restore(saved){
       controls=structuredClone(saved?.controls||[]);tags=structuredClone(saved?.tags||[]);measurement=saved?.measurement||[];
+      review.restore(saved?.review);
+      if(tags.some(tag=>tag.aggregation==='label centroid')){tags=tags.filter(tag=>tag.aggregation!=='label centroid');tags.push(...detectedTags());}
       $('surveyAltitude').value=saved?.altitude??'';$('surveyLiveRefine').checked=saved?.liveRefine!==false;
       for(const [k,layout] of Object.entries(saved?.windows||{}))windows[k]?.setLayout(layout);
       setTool('orbit');renderControls();publishTags();eachViewer(v=>v.setMeasurement(measurement,getContext().data?.georeference?.scale_m_per_unit||1));status('Project restored.');
     },
     reset(){
       controls=[];tags=[];pending=selected=null;measurement=[];photos=[];
-      const ctx=getContext(),groups=new Map();
-      for(const [key,item] of Object.entries(ctx.data?.point_labels||{})){
-        const index=Number(key);if(!item.label||index*3+2>=ctx.cloud.positions.length)continue;
-        if(!groups.has(item.label))groups.set(item.label,{name:item.label,sum:[0,0,0],count:0,index});
-        const group=groups.get(item.label);group.count++;group.sum=group.sum.map((v,k)=>v+ctx.cloud.positions[index*3+k]);
-      }
-      tags=[...groups.values()].map(g=>({name:g.name,local:g.sum.map(v=>v/g.count),point_index:g.index,indoor:false,floor:null,source:ctx.data.detector==='api'?'SAM 3.1 API':'Detected cloud label',aggregation:'label centroid'}));
+      review.restore(null);
+      tags=detectedTags();
       setTool('orbit');renderControls();publishTags();showPhoto();
     },
     attach(){
       const ctx=getContext();
-      eachViewer(viewer=>{viewer.onPointPick(pick);viewer.onControlPointPick(index=>startEdit(index,'cloud'));viewer.setTool(tool);});
+      eachViewer(viewer=>{viewer.onPointPick(pick);viewer.onControlPointPick(index=>startEdit(index,'cloud'));viewer.setTool(tool);
+        viewer.setIdentifyMetadata?.((index,local,label)=>{
+          if(host.hidden)return {};
+          const tag=tags.find(tag=>tag.aggregation!=='label centroid'&&tag.point_index===index);
+          const item=review.itemForPoint(index);
+          return {label:item?.label||tag?.name||label,object_id:item?.item_id??-1,metadata:[...(tag&&!tag.detected?[{title:'User tag',answer:{name:tag.name,item_id:tag.item_id,indoor:tag.indoor,floor:tag.floor}}]:[]),...review.identify(index,local,item?.label||tag?.name||label)]};
+        });});
       if(map!==ctx.map){
         if(map&&mapHandler)map.off('click',mapHandler);map=ctx.map;
         mapHandler=e=>{

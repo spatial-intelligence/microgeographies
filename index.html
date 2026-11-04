@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>MicroGeo Tool v0.38</title>
-  <meta name="description" content="Turn photos and video into mapped features and 3D point clouds. Choose a MicroGeo workflow to get started.">
+  <title>MicroGeog Mapper v0.42</title>
+  <meta name="description" content="Turn photos and video into mapped features and 3D point clouds. Choose a MicroGeog Mapper workflow to get started.">
   <meta name="theme-color" content="#050816" id="themeColorMeta">
   <script>
   // Early theme: set html[data-theme] before CSS paints to avoid a flash.
@@ -38,7 +38,7 @@
   <header class="appbar">
     <div class="appbar-row">
       <div>
-        <h1>MicroGeo Tool <span class="ver">v0.38</span></h1>
+        <h1>MicroGeog Mapper <span class="ver">v0.42</span></h1>
       </div>
       <div id="videoProjectBar" class="compact-projects" hidden>
         <details id="videoProjectMenu"><summary id="videoProjectCurrent">Projects</summary>
@@ -96,20 +96,37 @@
           </g>
           <g class="donut-hub" aria-hidden="true">
             <path d="M160 126l12 7v14l-12 7-12-7v-14Zm-12 7 12 7 12-7m-12 7v14"/>
-            <text x="160" y="175" text-anchor="middle">MicroGeo</text>
+            <text x="160" y="175" text-anchor="middle">MicroGeog Mapper</text>
             <text class="donut-hub-caption" x="160" y="190" text-anchor="middle">CHOOSE A WORKFLOW</text>
           </g>
         </svg>
       </div>
       <p class="landing-helper">Select a segment above, or explore the workflows below</p>
       <ul class="landing-list" aria-label="Available workflows">
-        <li><button type="button" data-workflow="region-download"><b>Region GeoJSON</b><span>Download buildings, entrances, roads and more.</span></button></li>
         <li><button type="button" data-workflow="single"><b>Single photo</b><span>Detect objects, estimate depth and map pins.</span></button></li>
         <li><button type="button" data-workflow="set-depth"><b>Photo set → pins</b><span>Merge photo features into map pins.</span></button></li>
         <li><button type="button" data-workflow="set-3d"><b>Photo set → 3D</b><span>Build a cloud from overlapping photos.</span></button></li>
         <li><button type="button" data-workflow="video-survey"><b>Video survey</b><span>Register, measure and tag a video cloud.</span></button></li>
         <li><button type="button" data-workflow="set-video"><b>Photo + video → 3D</b><span>Build a DA3 cloud and map tagged features.</span></button></li>
       </ul>
+      <ul class="landing-list landing-tools" aria-label="Preparation tools">
+        <li><button type="button" data-workflow="region-download"><b>Region GeoJSON</b><span>Download buildings, entrances, roads and more.</span></button></li>
+        <li><button type="button" data-workflow="image-resize"><b>Resize image ZIP</b><span>Downsize photos and download a new ZIP.</span></button></li>
+      </ul>
+    </section>
+
+    <section class="card" id="secResize" data-title="Resize image ZIP" hidden>
+      <h2>Resize image ZIP</h2>
+      <p>Downsize a ZIP of photos for smaller uploads and lower image-loading memory. The download keeps the original ZIP name with <code>_resize.zip</code> at the end.</p>
+      <form id="resizeZipForm">
+        <label>Image ZIP<input type="file" id="resizeZipFile" name="zipfile" accept=".zip,application/zip" required></label>
+        <div class="region-actions"><label>Longest edge (pixels)<input type="number" name="max_side" min="256" max="4096" step="1" value="1280" required></label>
+        <label>JPEG/WebP quality<input type="number" name="quality" min="40" max="100" step="1" value="85" required></label></div>
+        <button type="submit" id="resizeZipRun" class="primary">Resize &amp; download ZIP</button>
+      </form>
+      <p id="resizeZipStatus" role="status" aria-live="polite">Choose a ZIP to begin.</p>
+      <p class="hint">Supports JPEG, PNG and WebP. Images are never enlarged; already-small images are copied unchanged. Image filenames, folders and EXIF GPS/heading metadata are retained where present. Unsupported files and archive metadata folders are skipped.</p>
+      <p class="hint">Limits: 1 GB upload/uncompressed files, 2000 entries, 80 megapixels per image. Processing runs locally on this backend. DA3 already resizes photos internally, so smaller source images may not increase its GPU frame budget.</p>
     </section>
 
     <section class="card" id="secRegion" data-title="Download region GeoJSON" hidden>
@@ -342,7 +359,7 @@
             </select>
           </label>
           <label class="tool-slider">View <select id="sfmRenderMode"><option value="points">Point cloud</option><option value="mosaic" disabled>Photo mosaic / cutouts</option><option value="tin">TIN triangle mesh</option></select></label>
-          <label class="tool-slider">Synthetic densification <output id="sfmDensifyVal">?0</output><input id="sfmDensify" type="range" min="0" max="1000" step="0.1" value="0" title="Added density multiplier: ?1 adds one point per original, ?1000 adds up to 1000 per original; capped at 2 million added points. Fill local surface gaps; original geometry stays unchanged"></label>
+          <label class="tool-slider">Synthetic densification <output id="sfmDensifyVal">x0</output><input id="sfmDensify" type="range" min="0" max="1000" step="0.1" value="0" title="Added density multiplier: x1 adds one point per original, x1000 adds up to 1000 per original; capped at 2 million added points. Fill local surface gaps; original geometry stays unchanged"></label>
           <p id="sfmGeometryInfo" class="hint"></p>
           <label class="tool-slider">Point size <span id="sfmPointSizeVal">1×</span>
             <input type="range" id="sfmPointSize" min="0.25" max="4" step="0.25" value="1" aria-label="Point size">
@@ -442,12 +459,28 @@
         <input type="password" id="videoToken" autocomplete="off">
       </label>
       <label class="row"><input type="checkbox" id="videoSnap"> Snap door/window features to building outlines</label>
+      <label class="row" id="videoLocateRow" hidden><input type="checkbox" id="videoLocateHint" checked> Suggest a map starting point from the frame at about 1 second when GPS is missing</label>
+      <p class="hint" id="videoLocateHintNote" hidden>Runs alongside reconstruction using one additional Muse Spark 1.3 Contributor request and the Meta API key in Settings. If Spark cannot pinpoint the location, choose among its plausible candidates on the map. The frame may be used for training.</p>
       <button type="button" id="videoBtn" class="primary">Build cloud + map features</button>
       </div>
       <p id="videoOut">No run yet.</p>
       <progress id="videoProg" hidden></progress>
       <pre id="videoLog" class="sfm-log" hidden></pre>
       </details>
+      <div id="videoLocationHintsBar" hidden><button type="button" id="videoLocationHintOpen">Location hints</button><span id="videoLocationHintSummary" class="hint" role="status"></span></div>
+      <dialog id="videoLocationHints" class="mg-dlg location-hints" aria-labelledby="videoLocationHintTitle">
+        <div class="dlg-head"><h2 id="videoLocationHintTitle">Spark location hints</h2><button type="button" id="videoLocationHintDismiss">Close</button></div>
+        <p id="videoLocationHintStatus" role="status" aria-live="polite">Start a survey or choose a frame to ask Spark about its location.</p>
+        <figure class="location-current-frame"><img id="videoLocationHintImage" alt="Frame selected for the location lookup" hidden><figcaption id="videoLocationHintFrameInfo"></figcaption></figure>
+        <ul id="videoLocationHintChoices"></ul>
+        <details><summary>Choose another frame</summary>
+          <p class="hint">Preview roughly one frame per second for the next ten seconds. Previews stay on this backend; Meta receives only the frame you explicitly send.</p>
+          <label>Original survey video (choose again after reloading a project, if needed)<input id="videoLocationHintFile" type="file" accept="video/*,.mp4,.mov,.avi,.mkv,.webm"></label>
+          <button type="button" id="videoLocationHintNext">Preview next 10 seconds</button>
+          <div id="videoLocationHintFrames" class="location-frame-grid"></div>
+          <button type="button" id="videoLocationHintSend" disabled>Send selected frame to Spark (1 request)</button>
+        </details>
+      </dialog>
       <section id="videoSurveyTools" hidden></section>
       <div class="video-result-layout">
       <div class="video-3d-pane">
@@ -458,7 +491,7 @@
         <label>Brightness <input type="range" id="videoBrightness" min="0.25" max="3" value="1" step="0.05"></label>
         <label>Colours <select id="videoColorMode"><option value="photo">RGB</option><option value="class">Class colours</option><option value="distance">Distance from camera</option><option value="height">Height above lowest point</option></select></label>
         <label>View <select id="videoRenderMode"><option value="points">Point cloud</option><option value="gaussians" disabled>Gaussian splatting</option><option value="mosaic" disabled>Photo mosaic / cutouts</option><option value="tin">TIN triangle mesh</option></select></label>
-        <label>Synthetic densification <output id="videoDensifyVal">?0</output><input id="videoDensify" type="range" min="0" max="1000" step="0.1" value="0" title="Added density multiplier: ?1 adds one point per original, ?1000 adds up to 1000 per original; capped at 2 million added points. Fill local surface gaps; picking and exports retain original samples"></label>
+        <label>Synthetic densification <output id="videoDensifyVal">x0</output><input id="videoDensify" type="range" min="0" max="1000" step="0.1" value="0" title="Added density multiplier: x1 adds one point per original, x1000 adds up to 1000 per original; capped at 2 million added points. Fill local surface gaps; picking and exports retain original samples"></label>
         <button type="button" id="videoFit">Fit view</button>
 
 
@@ -533,6 +566,10 @@
       <h2 id="cfgTitle">Settings</h2>
       <button type="button" id="cfgClose" aria-label="Close setup">✕</button>
     </div>
+    <h3>GPU memory</h3>
+    <button type="button" id="clearGpuBtn">Clear GPU memory</button>
+    <p class="hint">Unloads backend models and releases unused GPU memory after a finished or failed job. Active jobs must finish first. Models reload on the next run; saved projects and downloaded weights stay available.</p>
+    <p id="clearGpuStatus" role="status" aria-live="polite"></p>
     <p class="hint">Shared by all workflows. Settings and API key are saved in this browser; the key is sent only with API requests.</p>
     <label>SAM 3.1 API key <input type="password" id="tokenInput" autocomplete="off" placeholder="Your Meta SAM 3.1 API key"></label>
     <h3>Detector</h3>
@@ -595,6 +632,8 @@
   <script src="map-basemaps.js"></script>
   <script src="vendor/osmtogeojson.js"></script>
   <script src="region-download.js"></script>
+  <script src="image-resize.js"></script>
+  <script src="location-hints.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

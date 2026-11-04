@@ -84,7 +84,7 @@ assert "geo" in j5["detections"][0], j5
 
 # 6. single-origin page serving: API routes keep precedence over static
 r6 = c.get("/")
-assert r6.status_code == 200 and "<title>MicroGeo Capture Tool" in r6.text, r6.status_code
+assert r6.status_code == 200 and "<title>MicroGeog Mapper" in r6.text, r6.status_code
 r7 = c.get("/app.js")
 assert r7.status_code == 200 and "renderMap" in r7.text
 print("static page serving OK (API precedence intact: see sections 1-5)")

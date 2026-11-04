@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import {formatIdentifyText} from './point-identify.js';
 
 export function measurementStations(start,end,interval=5){
   const distance=Math.hypot(...end.map((v,i)=>v-start[i]));
@@ -10,7 +11,7 @@ export function measurementStations(start,end,interval=5){
 
 export function createIdentifyTooltip(host){
   const tip=document.createElement('div');tip.className='identify-tooltip';tip.setAttribute('role','tooltip');tip.hidden=true;host.append(tip);
-  return {show(x,y,label,objectId){tip.textContent=`Class: ${label||'Unclassified'}${objectId>=0?` · Object #${objectId}`:''}`;tip.hidden=false;
+  return {show(x,y,label,objectId,metadata=[]){tip.textContent=formatIdentifyText(label,objectId,metadata);tip.hidden=false;
     tip.style.left=Math.max(4,Math.min(x+14,host.clientWidth-tip.offsetWidth-4))+'px';tip.style.top=Math.max(4,Math.min(y+14,host.clientHeight-tip.offsetHeight-4))+'px'},clear(){tip.hidden=true},dispose(){tip.remove()}};
 }
 

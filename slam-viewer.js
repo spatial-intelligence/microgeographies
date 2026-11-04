@@ -11,6 +11,7 @@ import { createGaussianLayer } from "./gaussian-view.js";
 import { createViewerCameraControls } from "./viewer-camera-controls.js";
 import { createCloudRepresentations } from "./cloud-representations.js";
 import { createClassLegend } from "./viewer-class-legend.js";
+import {createMainCameraMarker} from './viewer-camera-marker.js';
 
 // Wireframes only: camera poses must never become opaque scene geometry.
 export function createCameraOverlay(cameras, scale) {
@@ -136,6 +137,8 @@ function createCloudView(host, positions, rgb, classes, labels, votes, state, ca
   const raycaster = new THREE.Raycaster();
   const measurement = createMeasurementOverlay({host,scene,positions});
   const controlPoints = createControlPointOverlay({host,positions,onPick: id => state.onControlPointPick?.(id)});
+  const mainCameraMarker=createMainCameraMarker({host,canvas:renderer.domElement,camera,controls,
+    getPose:()=>state.linkedCamera?.getPose?.(),onChange:pose=>state.linkedCamera?.onChange?.(pose)});
   const pickPoint = e => {
     const r=renderer.domElement.getBoundingClientRect();
     camera.updateMatrixWorld();
@@ -165,7 +168,8 @@ function createCloudView(host, positions, rgb, classes, labels, votes, state, ca
   const identify = attachPointIdentify({
     host, canvas: renderer.domElement, getTool: () => state.tool,
     tooltip: createIdentifyTooltip(host),
-    identify: async index => ({ label: labels[index] || "Unclassified", object_id: -1 }),
+    identify: async index => {const label=labels[index]||'Unclassified';return {label,object_id:-1,
+      ...await state.identifyMetadata?.(index,Array.from(positions.subarray(index*3,index*3+3)),label)};},
     pick: pickPoint,
   });
   const toolButtons=[];
@@ -319,6 +323,7 @@ function createCloudView(host, positions, rgb, classes, labels, votes, state, ca
     if (state.colorMode === "distance") color();
     gaussianLayer?.update(camera, renderer.domElement.height);
     measurement.update(camera); controlPoints.update(camera);
+    mainCameraMarker.update();
     renderer.render(scene, camera);
   }
   function zoomBy(factor) {
@@ -368,6 +373,8 @@ function createCloudView(host, positions, rgb, classes, labels, votes, state, ca
   renderer.domElement.addEventListener("pointerdown", pointerdown);
   color(); fit(); applyCameraSettings();loop();
   return { fit, zoomBy, color, getPose, flyTo, cancelFlight, resetRoll: () => roll.reset(),
+    getReviewProjection(){camera.updateMatrixWorld();const rect=renderer.domElement.getBoundingClientRect();return {
+      matrix:new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix,camera.matrixWorldInverse).toArray(),width:rect.width,height:rect.height};},
     preset,
     syncTool,
     setGroundReference(reference){updateGround(reference);enforceGround();},
@@ -393,6 +400,7 @@ function createCloudView(host, positions, rgb, classes, labels, votes, state, ca
       identify.dispose(); navigation.dispose(); roll.dispose();
       toolButtons.forEach(({button})=>button.remove());toolstrip.remove();pickStatus.remove();
       measurement.dispose(); controlPoints.dispose();
+      mainCameraMarker.dispose();
       cameraPanel.dispose();
       classLegend.dispose();
       representations.dispose();
@@ -429,6 +437,7 @@ export function createViewer(container, oldPopup) {
     zoomBy(factor) { view?.zoomBy(factor); },
     setTool(tool) { state.tool = tool; view?.syncTool(); },
     onPointPick(handler) { state.onPointPick = handler; },
+    setIdentifyMetadata(provider){state.identifyMetadata=provider;view?.clearIdentify();},
     onControlPointPick(handler) { state.onControlPointPick = handler; },
     setPreset(name) { view?.preset(name); },
     setGroundReference(reference){view?.setGroundReference(reference);},
@@ -445,6 +454,8 @@ export function createViewer(container, oldPopup) {
     getGeometryInfo(){return view?.getGeometryInfo()||null;},
     setRenderMode(mode) {state.renderMode=['points','tin','mosaic','gaussians'].includes(mode)?mode:'points';view?.setRenderMode(state.renderMode);},
     getPose() { return view?.getPose() || null; },
+    setLinkedCamera(link){state.linkedCamera=link;},
+    getReviewProjection(){return view?.getReviewProjection()||null;},
     flyTo(pose, duration) { return view?.flyTo(pose, duration) || Promise.resolve(false); },
     cancelFlight() { view?.cancelFlight(); },
     setCamerasVisible(visible) { state.camerasVisible = Boolean(visible); view?.setCamerasVisible(state.camerasVisible); },
