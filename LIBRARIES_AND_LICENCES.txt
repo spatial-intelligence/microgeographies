@@ -1,0 +1,195 @@
+MICROGEOG MAPPER - LIBRARIES AND LICENCES
+Prepared: 4 November 2026
+
+INTRODUCTION
+
+This guide lists the main third-party libraries, AI models and supporting
+components used or supported by this project. Software code, model weights,
+map data and hosted APIs can have different licence terms. An optional
+component's terms matter when that component is installed or used.
+
+The inventory is based on backend/requirements.txt, the Dockerfile, source
+imports, vendor licence notices and local package metadata. Most Python
+dependencies are unpinned, so versions and bundled licences can vary by
+installation. This is not a complete software bill of materials for every
+transitive dependency or operating-system package in the Docker image.
+
+No root-level licence was found for the project's own original code.
+Third-party licences do not automatically license that original code.
+
+1. FRONTEND LIBRARIES
+
+Library                                  Version       Licence
+--------------------------------------------------------------------------
+Three.js, including OrbitControls        r180          MIT
+Leaflet                                  1.9.4         BSD-2-Clause
+osmtogeojson                             Bundled       MIT
+Delaunator                               5.0.1         ISC
+robust-predicates (inside Delaunator)     Bundled       Unlicense/public domain
+TensorFlow.js                            4.17.0        Apache-2.0
+TensorFlow COCO-SSD                       2.2.3         Apache-2.0
+ONNX Runtime Web                         1.22.0        MIT
+Space Grotesk font                       Google Fonts  SIL OFL 1.1
+Space Mono font                          Google Fonts  SIL OFL 1.1
+
+Bundled licence notices:
+  vendor/LICENSE-THREE.txt
+  vendor/leaflet-LICENSE.txt
+  vendor/LICENSE-OSMTOGEOJSON.txt
+  vendor/LICENSE-DELAUNATOR.txt
+  vendor/LICENSE-ROBUST-PREDICATES.txt
+
+osmtogeojson also bundles dependencies, including a Lodash custom build,
+@mapbox/geojson-rewind and osm-polygon-features. Their individual notices
+should be included in a complete redistribution inventory; the MIT entry
+above describes osmtogeojson itself.
+
+2. BACKEND AND TESTING LIBRARIES
+
+Library                                  Licence
+--------------------------------------------------------------------------
+FastAPI                                  MIT
+Uvicorn                                  BSD-3-Clause
+python-multipart                         Apache-2.0
+Pillow                                   MIT-CMU
+NumPy                                    BSD-3-Clause, plus bundled licences
+PyTorch (torch)                          BSD-style core, plus bundled licences
+Torchvision                              BSD-3-Clause
+Hugging Face Transformers                Apache-2.0
+Ultralytics                              AGPL-3.0 or Enterprise licence
+OpenCV / opencv-python-headless           Apache-2.0 for current OpenCV;
+                                         additional wheel component notices
+Depth Anything 3 code                    Apache-2.0
+addict                                   MIT
+pycolmap (optional fallback)              BSD-3-Clause
+pytest                                   MIT
+Playwright (browser testing)              Apache-2.0
+
+Uvicorn's standard extras have their own licences. PyTorch's locally
+installed wheel declares Apache-2.0, Apache-2.0 WITH LLVM-exception,
+BSD-2-Clause, BSD-3-Clause, BSL-1.0 and MIT for its combined contents.
+The locally installed NumPy metadata declares BSD-3-Clause, 0BSD, MIT,
+Zlib and CC0-1.0. Preserve the notices supplied with the actual wheels.
+
+3. AI MODELS AND WEIGHTS
+
+Model                                    Licence
+--------------------------------------------------------------------------
+Depth Anything V1 Small                   Apache-2.0
+  LiheYoung/depth-anything-small-hf
+DA3 Small                                Apache-2.0
+  depth-anything/DA3-SMALL
+DA3 Giant 1.1                            CC-BY-NC-4.0 (non-commercial)
+  depth-anything/DA3-GIANT-1.1
+DA3 Nested Giant-Large 1.1                CC-BY-NC-4.0 (non-commercial)
+  depth-anything/DA3NESTED-GIANT-LARGE-1.1
+YOLO26 depth                             Ultralytics AGPL-3.0 / Enterprise terms
+  yolo26n-depth.pt
+CLIP                                     MIT
+  openai/clip-vit-base-patch32
+SAM 3                                    Custom Meta SAM License
+  facebook/sam3
+Browser SAM 3 conversion                 Model card declares Apache-2.0;
+  rusen/sam3-browser-int8                 upstream SAM terms need checking
+
+DA3 code and DA3 weights do not all share one licence. The default video
+model and Giant 1.1 weights have non-commercial terms even though the
+DA3 code is Apache-2.0. SAM 3 uses Meta's custom licence. The browser
+conversion's Apache label should not be treated as proof that upstream
+model obligations have been removed.
+
+4. DOCKER AND RECONSTRUCTION COMPONENTS
+
+Component                                Licence / qualification
+--------------------------------------------------------------------------
+COLMAP 3.9.1                             BSD-3-Clause for COLMAP itself
+Ceres Solver 2.2.0                       BSD-3-Clause, plus third-party notices
+SiftGPU bundled with COLMAP              Custom educational, research and
+                                         non-profit licence
+LSD bundled with COLMAP                  AGPL-3.0
+CGAL                                    GPL/LGPL or commercial, by component
+FreeImage                               FreeImage Public License or GPL
+NVIDIA CUDA                             NVIDIA proprietary licence terms
+
+COLMAP's BSD licence does not cover all its dependencies. The SiftGPU
+licence is especially relevant to the CUDA-enabled Docker build.
+The Dockerfile also installs Boost, Eigen, FLANN, METIS, glog, gflags,
+GoogleTest/GoogleMock, SQLite, GLEW, ATLAS and SuiteSparse, alongside
+build tools and Ubuntu packages. Their exact package versions and
+component licences require a separate inventory of the built image.
+
+5. MAP DATA AND HOSTED SERVICES
+
+OpenStreetMap data: Open Database License (ODbL), with attribution and
+other applicable database obligations. Tile-service usage policies apply
+separately from the data licence.
+
+Esri World Imagery: Esri and imagery-provider terms and attribution apply.
+It should not be treated as openly licensed imagery merely because the
+application can display it.
+
+Meta API (SAM 3.1 / Spark): hosted-service terms apply separately from
+the licences of locally installed libraries and model weights.
+
+6. PRACTICAL READING GUIDE
+
+MIT, BSD and ISC: generally permissive; retain the applicable copyright,
+licence and disclaimer notices when redistributing.
+
+Apache-2.0: generally permissive, with notice, attribution and other
+conditions, including provisions concerning patents and modifications.
+
+Unlicense/public domain: broad reuse permission under its stated terms.
+
+AGPL-3.0: a copyleft licence with source-availability obligations in
+applicable distribution and network-use situations. Ultralytics offers
+separate Enterprise terms.
+
+CC-BY-NC-4.0: attribution and non-commercial conditions apply.
+
+SIL OFL 1.1: permits font use and redistribution subject to its conditions.
+
+Custom licences: read the actual terms, particularly for Meta SAM,
+SiftGPU, NVIDIA CUDA and hosted services.
+
+This is a technical inventory and introductory guide, not a determination
+that a particular deployment or redistribution satisfies every licence.
+
+7. REFERENCE SOURCES
+
+Local evidence:
+  backend/requirements.txt
+  Dockerfile
+  vendor/ licence files listed above
+  mobilenet.js, sam3local.js, map-basemaps.js and index.html
+  backend model-loading code and local Python package metadata
+
+Frontend:
+  https://github.com/tensorflow/tfjs/blob/master/LICENSE
+  https://github.com/tensorflow/tfjs-models/blob/master/LICENSE
+  https://github.com/microsoft/onnxruntime/blob/main/LICENSE
+  https://github.com/google/fonts/blob/main/ofl/spacegrotesk/OFL.txt
+  https://github.com/google/fonts/blob/main/ofl/spacemono/OFL.txt
+
+Backend and testing:
+  https://github.com/pytorch/pytorch/blob/main/LICENSE
+  https://github.com/huggingface/transformers/blob/main/LICENSE
+  https://github.com/opencv/opencv-python/blob/4.x/LICENSE.txt
+  https://www.ultralytics.com/license
+  https://github.com/microsoft/playwright/blob/main/LICENSE
+
+Models:
+  https://huggingface.co/LiheYoung/depth-anything-small-hf/blob/main/README.md
+  https://github.com/ByteDance-Seed/Depth-Anything-3
+  https://github.com/openai/CLIP/blob/main/LICENSE
+  https://huggingface.co/facebook/sam3/blob/main/LICENSE
+  https://huggingface.co/rusen/sam3-browser-int8
+
+Reconstruction and data:
+  https://github.com/colmap/colmap/blob/main/doc/license.rst
+  https://github.com/ceres-solver/ceres-solver/blob/2.2.0/LICENSE
+  https://raw.githubusercontent.com/colmap/colmap/3.9.1/src/thirdparty/SiftGPU/LICENSE
+  https://raw.githubusercontent.com/colmap/colmap/3.9.1/src/thirdparty/LSD/LICENSE
+  https://www.cgal.org/license.html
+  https://freeimage.sourceforge.io/license.html
+  https://www.openstreetmap.org/copyright
