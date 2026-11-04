@@ -23,6 +23,7 @@ const context=vm.createContext({...Three,THREE:{...Three,WebGLRenderer:class{
   render(scene,camera){renderedScene=scene;renderedCamera=camera;}
   dispose(){}
 }},window:{devicePixelRatio:1},document:{createElement(){return new Element();}},
+setTimeout,clearTimeout,
 ResizeObserver:class{observe(){}disconnect(){}},requestAnimationFrame(fn){nextFrame=fn;return 1;},cancelAnimationFrame(){nextFrame=null;}});
 function load(path,names){
   let code=readFileSync(new URL(path,import.meta.url),'utf8');
@@ -33,11 +34,16 @@ Object.assign(context,load('../vendor/OrbitControls.js',['OrbitControls']));
 Object.assign(context,load('../view-navigation.js',['createViewNavigation']));
 Object.assign(context,load('../view-roll.js',['createViewRoll']));
 Object.assign(context,load('../point-identify.js',['attachPointIdentify']));
-Object.assign(context,load('../viewer-annotations.js',['createIdentifyTooltip']));
-const {createViewer,createCameraOverlay}=load('../slam-viewer.js',['createViewer','createCameraOverlay']);
+Object.assign(context,load('../viewer-class-legend.js',['classLegendEntries','createClassLegend']));
+Object.assign(context,load('../cloud-representations.js',['createCloudRepresentations']));
+Object.assign(context,load('../viewer-camera-controls.js',['createViewerCameraControls']));
+Object.assign(context,load('../viewer-annotations.js',['createIdentifyTooltip','createMeasurementOverlay','createControlPointOverlay']));
+const {createViewer,createCameraOverlay,cloudHeightValues}=load('../slam-viewer.js',['createViewer','createCameraOverlay','cloudHeightValues']);
 const host=new Element(),viewer=createViewer(host);
 const positions=new Float32Array([-3,-2,0,3,2,4,0,0,2]);
 const rgb=new Float32Array(positions.length).fill(.7);
+assert.deepEqual(Array.from(cloudHeightValues(positions)),[4,0,2]);
+assert.deepEqual(Array.from(cloudHeightValues(positions,[0,0,2])),[0,8,4],'Fitted vertical carries metric scale');
 viewer.setCloud(positions,rgb,rgb,['a','b','c']);
 const tick=()=>nextFrame();
 const center=new Three.Vector3(0,0,2),span=Math.sqrt(36+16+16);
@@ -116,5 +122,57 @@ assert.equal(await flight,true);
 assert.ok(renderedCamera.position.distanceTo(new Three.Vector3(...saved.position))<1e-7);
 const cancelled=viewer.flyTo(saved,1000);viewer.cancelFlight();
 assert.equal(await cancelled,false);
+viewer.setColorMode('height');
+const heightColors=renderedScene.children[0].geometry.attributes.color.array.slice();
+press('w');advance(time+=40);release('w');
+assert.deepEqual(renderedScene.children[0].geometry.attributes.color.array,heightColors,'Height colours must not change as the camera moves');
+viewer.setCloud(positions,rgb,rgb,[],[],[{qvec:[basis.w,basis.x,basis.y,basis.z],tvec:[0,0,0]}]);tick();
+for(const [name,direction] of Object.entries({top:[0,-1,0],bottom:[0,1,0],left:[-1,0,0],right:[1,0,0],front:[0,0,-1],back:[0,0,1]})) {
+  viewer.setPreset(name);tick();
+  const expected=new Three.Vector3(...direction).applyQuaternion(inverse);
+  const pose=viewer.getPose(),actual=new Three.Vector3(...pose.position).sub(new Three.Vector3(...pose.target)).normalize();
+  assert.ok(actual.distanceTo(expected)<1e-6,`${name} preset follows the reconstruction camera axes`);
+  const forward=renderedCamera.getWorldDirection(new Three.Vector3());
+  assert.ok(forward.distanceTo(expected.negate())<1e-6,`${name} looks at the cloud`);
+}
+viewer.setPreset('perspective');tick();
+assert.ok(renderedCamera.position.distanceTo(center.clone().add(new Three.Vector3(span*.45,-span*.35,-span*.65).applyQuaternion(inverse)))<1e-7);
+const primaryFrame=nextFrame,primaryCanvas=canvas;
+const firstPose=viewer.getPose(),secondHost=new Element(),secondViewer=createViewer(secondHost);
+secondViewer.setCloud(positions,rgb,rgb);secondViewer.setPreset('right');
+assert.deepEqual(viewer.getPose(),firstPose,'Changing the second camera leaves the first pose unchanged');
+secondViewer.dispose();
+nextFrame=primaryFrame;canvas=primaryCanvas;
+viewer.setCameraSettings({fov:90,depthMin:4,depthMax:16,depthScale:2,navigationMode:'walk'});
+tick();assert.equal(renderedCamera.fov,90);assert.equal(renderedCamera.near,2);assert.equal(renderedCamera.far,8);
+const beforeLook=viewer.getPose();
+for(const fn of canvas.listeners.get('pointerdown')||[])fn(event(300,200));
+for(const fn of canvas.listeners.get('pointermove')||[])fn(event(360,220));
+for(const fn of canvas.listeners.get('pointerup')||[])fn(event(360,220));
+tick();assert.ok(Math.hypot(...viewer.getPose().position.map((v,i)=>v-beforeLook.position[i]))<1e-8,'WALK mouse look keeps camera position fixed');
+assert.notDeepEqual(viewer.getPose().target,beforeLook.target,'WALK mouse look changes viewing direction');
+// Clamp all navigation/presets to the cloud's true vertical, not camera roll/up.
+viewer.setGroundReference({available:true,matrix:[[1,0,0],[0,1,0],[0,0,2]]});
+viewer.setCameraSettings({groundBarrier:true});
+const below={position:[0,0,-20],target:[0,0,-10],up:[0,-1,0],roll:0};
+let landing=viewer.flyTo(below,1);advance(time+=40);await landing;
+assert.ok(viewer.getPose().position[2]>=0,'Flight respects world ground elevation');
+const walkDirection=new Three.Vector3(...viewer.getPose().target).sub(new Three.Vector3(...viewer.getPose().position));
+assert.ok(Math.abs(walkDirection.z-10)<1e-6,'Ground correction preserves WALK look direction');
+assert.equal(viewer.getCameraSettings().groundBarrier,true);
+viewer.setCameraSettings({navigationMode:'orbit'});viewer.setPreset('front');advance(time+=40);
+assert.ok(viewer.getPose().position[2]>=0,'Preset/orbit cannot go below registered ground');
+viewer.setCameraSettings({groundLevel:5});landing=viewer.flyTo(below,1);advance(time+=40);await landing;
+assert.ok(viewer.getPose().position[2]>=5,'Editable ground level raises the barrier');
+viewer.setCameraSettings({groundLevel:null});
+viewer.setCameraSettings({groundBarrier:false});landing=viewer.flyTo(below,1);advance(time+=40);await landing;
+assert.ok(viewer.getPose().position[2]<0,'Barrier can be turned off');
+const floorCloud=Float32Array.from([[0,1000,0],...Array.from({length:100},(_,i)=>[i%10,0,Math.floor(i/10)])].flat());
+viewer.setCloud(floorCloud,new Float32Array(floorCloud.length).fill(.5),new Float32Array(floorCloud.length).fill(.5));
+viewer.setCameraSettings({groundBarrier:true,groundLevel:null,navigationMode:'walk'});
+landing=viewer.flyTo({position:[0,50,0],target:[0,50,5],up:[0,-1,0],roll:0},1);advance(time+=40);await landing;
+assert.ok(viewer.getPose().position[1]<=0,'Auto floor ignores a solitary point below the visible floor');
+press('f');for(let i=0;i<12;i++)advance(time+=40);release('f');
+assert.ok(viewer.getPose().position[1]<=0,'Holding down in WALK stays above the floor');
 viewer.dispose();assert.equal(host.children.length,0);assert.equal(nextFrame,null);
 export const navigationChecksPassed=true;

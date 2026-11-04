@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
-import {geographicPoint} from '../geo-cloud.js';
+import {geographicPoint,buildMappedFeatures} from '../geo-cloud.js';
 
 const code=readFileSync(new URL('../sfm3d.js',import.meta.url),'utf8')
   .replace(/^import[^\n]+\r?\n/gm,'')
@@ -21,3 +21,11 @@ assert.equal(located.features[0].geometry.coordinates[2],130);
 const local=JSON.parse(buildGeoJson(positions,colors,['door'],[2],[0]));
 assert.equal(local.features[0].geometry,null,'Local metres must never masquerade as longitude/latitude');
 assert.deepEqual(local.features[0].properties.local_xyz,[10,20,30]);
+const modelPositions=new Float32Array([0,0,0, 2,0,0, 5,0,0, 9,0,0]);
+const features=buildMappedFeatures(modelPositions,['door','door','steps','steps'],[1,2,1,1],
+  {...reference,available:true},{steps:'line'});
+assert.equal(features.features.length,2,'A mapped feature represents labelled geometry, not each cloud sample');
+assert.equal(features.features[0].properties.point_count,2);
+assert.equal(features.features[0].geometry.type,'Point');
+assert.equal(features.features[1].geometry.type,'LineString');
+assert.equal(buildMappedFeatures(modelPositions,['door'],[],null).features.length,0);

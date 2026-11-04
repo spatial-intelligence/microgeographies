@@ -2,21 +2,41 @@
   "use strict";
   const $ = (id) => document.getElementById(id);
   const cfg = window.MG_CONFIG || {};
+  let videoOverviewWindow=null,videoOverviewHome=null;
+  function dockVideoOverview(){
+    const pane=$("videoSecondPane");videoOverviewWindow?.hide();pane.hidden=true;videoOverviewHome?.append(pane);pane.classList.remove('floating-overview');$("videoSecondFloat").setAttribute('aria-expanded','false');
+  }
+  async function floatVideoOverview(layout=null){
+    const pane=$("videoSecondPane");
+    if(pane.classList.contains('floating-overview')&&!layout){dockVideoOverview();return;}
+    videoOverviewHome ||= pane.parentElement;
+    if(!videoOverviewWindow){const {createToolWindow}=await import('./floating-windows.js');videoOverviewWindow=createToolWindow({id:'videoOverviewWindow',title:'Second 3D view',content:pane,width:520,left:Math.max(12,innerWidth*.4),top:110,className:'overview-window',onClose:dockVideoOverview});videoOverviewWindow.element.style.height='380px';}
+    else videoOverviewWindow.element.querySelector('.tool-window-body').append(pane);
+    pane.hidden=false;pane.classList.add('floating-overview');$("videoSecondFloat").setAttribute('aria-expanded','true');if(layout)videoOverviewWindow.setLayout(layout);videoOverviewWindow.show();
+  }
   const overviewMaps = new Map(), cloudMapLayers = new Map();
   let sfmBookmarks = null, videoBookmarks = null;
+  let setFeatureSource = "model", setBusy = false;
+  async function openMapTagEditor(options){const {editMapTag}=await import('./map-tag-editor.js');editMapTag(options);}
+  function editFeatureTag(feature,redraw){
+    const [lon,lat]=feature.geometry.coordinates,p=feature.properties;
+    openMapTagEditor({name:p.name||p.label,lat,lon,indoor:p.indoor,floor:p.floor,onSave:value=>{
+      Object.assign(p,{name:value.name,label:value.name,indoor:value.indoor,floor:value.floor});feature.geometry.coordinates=[value.lon,value.lat,...feature.geometry.coordinates.slice(2)];redraw();
+    }});
+  }
+  function reconstructionPhotos(data){return data.source_frames||Object.entries(data.thumbnails||{}).map(([image,url])=>({image,url}));}
+  function geometrySummary(detail){const i=detail.info;if(!i)return '';let text=detail.mode==='tin'?`${i.triangles.toLocaleString()} triangles / ${i.meshVertices.toLocaleString()} vertices - smaller Point Size makes a finer TIN.`:detail.mode==='mosaic'?`${i.photos} / ${i.photoTotal} source photos${i.planarPhotos?' / '+i.planarPhotos+' photo planes at estimated scene depth':''}.`:`${i.original.toLocaleString()} original + ${i.synthetic.toLocaleString()} synthetic points (?${(i.synthetic/Math.max(1,i.original)).toFixed(1)} added).${i.requested>i.target?' Preview capped at 2 million added points.':''} Picking and exports use original samples.`;if(i.busy)text+=' Building preview...';if(i.error)text+=' '+i.error;return text;}
   function registerMap(id, instance) {
     overviewMaps.set(id, instance);
+    window.MGMaps.addBasemaps(instance, id);
     new ResizeObserver(() => instance.invalidateSize()).observe($(id));
   }
   function initWorkflowMaps(mode) {
     if (mode === "single") renderMap();
-    if (mode === "set-3d" && !sfmMap) renderSfmMap({});
-    if (mode === "set-video" && !videoMap) renderVideoMap({});
-    if (mode === "set-depth" && !overviewMaps.has("batchMap") && window.L) {
+    if ((mode === "set-depth" || mode === "set-3d") && !sfmMap) renderSfmMap({});
+    if ((mode === "set-video" || mode === "video-survey") && !videoMap) renderVideoMap({});
+    if ((mode === "set-depth" || mode === "set-3d") && !overviewMaps.has("batchMap") && window.L) {
       const instance = window.L.map("batchMap", {maxZoom: 22}).setView([20,0],2);
-      window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 22, maxNativeZoom: 19, attribution: "&copy; OpenStreetMap contributors"
-      }).addTo(instance);
       registerMap("batchMap", instance);
     }
     overviewMaps.forEach(instance => instance.invalidateSize());
@@ -160,6 +180,9 @@
     });
   });
 
+  $("singleDetectorChoice").value=samBackend();
+  $("singleDetectorChoice").onchange=e=>{const radio=document.querySelector('input[name="samBackend"][value="'+e.target.value+'"]');if(radio){radio.checked=true;radio.dispatchEvent(new Event('change'));}};
+  document.querySelectorAll('input[name="samBackend"]').forEach(el=>el.addEventListener('change',()=>$("singleDetectorChoice").value=samBackend()));
   const exifOut = $("exifOut");
   const manualLat = $("manualLat"), manualLon = $("manualLon");
 
@@ -538,7 +561,6 @@
     setStatus("Encoding image in browser…");
     const feats = await window.MG_SAM3.encodeImage(chw);
     const all = [];
-    let n = 0;
     for (const concept of prompts) {
       setStatus(`Finding "${concept}" in browser (${++n}/${prompts.length})…`);
       for (const b of await window.MG_SAM3.detect(feats, concept, sent.w, sent.h)) all.push(b);
@@ -868,7 +890,7 @@
       return {
         type: "Feature",
         geometry,
-        properties: { label: b.label, score: b.score,
+        properties: { label: b.label, name:b.label, indoor:b.indoor??false, floor:b.indoor?b.floor:null, score: b.score,
           geom: b.geom || "point",
           pinKind: pin ? pin.kind : null, // path | snapped | projected | camera
           geo: b.geo ?? null, snapped: b.snapped ?? null,
@@ -901,14 +923,15 @@
               note: "Single-photo route: detect, depth, map pin.",
               title: "Single photo",
               blurb: "Detect objects, monocular depth, map pin." },
-    "set-depth": { sections: ["secSet", "secBatch", "secExport"],
+    "set-depth": { sections: ["secSet", "secSetObjects", "secSetProcess", "secSetResults", "secSfm", "secExport"],
               note: "Set route: the shared zip + concepts above; depth runs per photo for pins.",
               title: "Photo set → pins",
               blurb: "Zip in, depth + merged map pins per photo." },
-    "set-3d": { sections: ["secSet", "secSfm", "secExport"],
-              note: "Set route: the shared zip + concepts above; COLMAP only — no depth pass.",
+    "set-3d": { sections: ["secSet", "secSetObjects", "secSetProcess", "secSetResults", "secSfm", "secExport"],
+              note: "Build a photo-set model with COLMAP or DA3, then export features or the cloud.",
               title: "Photo set → 3D",
-              blurb: "Zip in, COLMAP cloud with labels. No depth pass." },
+              blurb: "Photo ZIP to a labelled COLMAP or DA3 model and mapped features." },
+    "video-survey": { sections: ["secVideo", "secExport"], note: "Video-only DA3 Giant-Large survey", title: "Video to registered 3D survey", blurb: "Register a video cloud, measure and tag world-coordinate locations." },
     "set-video": { sections: ["secVideo", "secExport"],
               note: "Photo + video route: DA3 point cloud, tagged features, map pins.",
               title: "Photo + video → DA3 cloud",
@@ -916,8 +939,9 @@
   };
   const modeOut = $("modeOut");
   function syncSetLabellingControls() {
-    const disabled = currentMode() === "set-3d" && !$("sfmUseSam").checked;
-    $("setSamToggle").hidden = currentMode() !== "set-3d";
+    const disabled = !$("sfmUseSam").checked;
+    $("setSamToggle").hidden = false;
+    $("batchBtn").disabled = disabled || setBusy;
     ["setConcepts", "setDetector", "setApiToken"].forEach((id) => { $(id).disabled = disabled; });
     ["setConcepts", "setDetector"].forEach(id => { $(id).closest("label").hidden = disabled; });
     $("setLabellingNote").hidden = !disabled;
@@ -928,6 +952,9 @@
     return (el && MODES[el.value]) ? el.value : "single";
   }
   function setMode(mode) {
+    $("videoProjectStatus").classList.remove("show");
+    dockVideoOverview();
+    document.querySelectorAll(".tool-window").forEach(panel=>panel.hidden=true);
     if (!MODES[mode]) mode = "single";
     document.querySelectorAll('input[name="mode"]').forEach((el) => {
       el.checked = el.value === mode;
@@ -935,26 +962,40 @@
     const vis = MODES[mode].sections;
     let n = 0;
     ["secPhoto", "secObjects", "secDetector", "secResults", "secMatch", "secStage",
-     "secSet", "secBatch", "secSfm", "secVideo", "secExport"].forEach((id) => {
+     "secSet", "secSetObjects", "secSetProcess", "secSetResults", "secSfm", "secVideo", "secExport"].forEach((id) => {
       const sec = $(id);
       if (!sec) return;
       const show = vis.indexOf(id) >= 0;
       sec.hidden = !show;
       if (show) {
-        n++;
         const h = sec.querySelector("h2");
-        if (h) h.textContent = `${n}. ${sec.dataset.title || h.textContent}`;
+        if (h) h.textContent = sec.dataset.title || h.textContent.replace(/^\d+\.\s*/, "");
       }
     });
     if (modeOut) modeOut.textContent = MODES[mode].note;
-    document.body.classList.toggle("wide", mode === "set-3d" || mode === "set-video");
+    document.body.classList.toggle("wide", mode === "set-3d" || mode === "set-video" || mode === "video-survey");
     document.body.dataset.mode = mode;
+    document.body.classList.toggle("photo-set-console", mode === "set-depth" || mode === "set-3d");
     // The Leaflet map lives in the fixed single-mode stage: re-measure
     // it whenever single mode (re)appears, or tiles render for a
     // zero-size box.
     if (mode === "single" && map) {
       requestAnimationFrame(() => map.invalidateSize());
     }
+    const surveyMode = mode === "video-survey";
+    $("workflowTitle").textContent=MODES[mode].title;$("workflowTitle").hidden=false;
+    $("videoProjectBar").hidden = !surveyMode;
+    $("videoSamToggle").hidden = !surveyMode;
+    $("videoSecondPane").hidden = true;
+    $("videoSecondFloat").hidden = !surveyMode;
+    $("videoOnlyRow").hidden = !surveyMode;
+    $("videoSurveyIntro").hidden = !surveyMode;
+    $("videoSurveyTools").hidden = !surveyMode;
+    $("videoZip").closest("label").hidden = surveyMode;
+    $("videoZip").closest(".card").querySelector("p.hint").hidden = surveyMode;
+    ["videoConcepts", "videoDetector"].forEach(id => $(id).closest("label").hidden = surveyMode && !$("videoUseSam").checked);
+    $("videoSnap").closest("label").hidden = surveyMode;
+    $("videoBtn").textContent = surveyMode ? "Build video cloud" : "Build cloud + map features";
     syncSetLabellingControls();
     try { localStorage.setItem("mg.mode", mode); } catch (e) { /* private mode */ }
   }
@@ -967,7 +1008,7 @@
     workflowTitle = $("workflowTitle"), workflowBlurb = $("workflowBlurb"),
     backBtn = $("backBtn");
   const ALL_SECTIONS = ["secPhoto", "secObjects", "secDetector", "secResults", "secMatch", "secStage",
-    "secSet", "secBatch", "secSfm", "secVideo", "secExport"];
+    "secSet", "secSetObjects", "secSetProcess", "secSetResults", "secSfm", "secVideo", "secExport"];
   function paintWorkflowNav(mode) {
     if (workflowTitle) workflowTitle.textContent = MODES[mode].title;
     if (workflowBlurb) workflowBlurb.textContent = MODES[mode].blurb;
@@ -996,8 +1037,8 @@
     if (landing) landing.hidden = true;
     if (workflowNav) workflowNav.hidden = true;
     document.body.dataset.view = "workflow";
-    document.querySelectorAll("[data-export-workflow]").forEach(el => { el.hidden = el.dataset.exportWorkflow !== mode; });
-    requestAnimationFrame(() => initWorkflowMaps(mode));
+    document.querySelectorAll("[data-export-workflow]").forEach(el => { el.hidden = !el.dataset.exportWorkflow.split(" ").includes(mode); });
+    requestAnimationFrame(() => { initWorkflowMaps(mode); if (mode.startsWith("set-") && mode !== "set-video") setMapSource(mode === "set-3d" ? "model" : "photos"); });
     const nav = (opts && opts.push === false) ? "replaceState" : "pushState";
     try {
       window.history[nav]({ workflow: mode }, "", workflowUrl(mode));
@@ -1005,12 +1046,16 @@
     window.scrollTo(0, 0);
   }
   function showLanding(opts) {
+    $("workflowTitle").hidden=true;
+    $("videoProjectStatus").classList.remove("show");
+    dockVideoOverview();$("videoProjectBar").hidden=true;
+    document.querySelectorAll(".tool-window").forEach(panel=>panel.hidden=true);
     sfmBookmarks?.stop(); videoBookmarks?.stop();
     ALL_SECTIONS.forEach((id) => { const sec = $(id); if (sec) sec.hidden = true; });
     if (landing) landing.hidden = false;
     if (workflowNav) workflowNav.hidden = true;
     document.body.dataset.view = "landing";
-    document.body.classList.remove("wide");
+    document.body.classList.remove("wide", "photo-set-console");
     const nav = (opts && opts.push === false) ? "replaceState" : "pushState";
     try {
       window.history[nav]({}, "", landingUrl());
@@ -1089,11 +1134,12 @@
       ? `Selected: <b></b> (${(f.size / 1024).toFixed(0)} KB) — drop another .zip or click to change.`
       : `Drop a <b>.zip</b> of photos here, or click to pick one.`;
     if (f) zipDrop.querySelector("b").textContent = f.name;
+    clearSetResults();
   }
   if (zipDrop) {
-    zipDrop.addEventListener("click", () => zipInput.click());
+    zipDrop.addEventListener("click", () => { if (!setBusy) zipInput.click(); });
     zipDrop.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); zipInput.click(); }
+      if (!setBusy && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); zipInput.click(); }
     });
     zipInput.addEventListener("change", zipName);
     ["dragenter", "dragover"].forEach((ev) => zipDrop.addEventListener(ev, (e) => {
@@ -1106,7 +1152,7 @@
     }));
     zipDrop.addEventListener("drop", (e) => {
       const dt = e.dataTransfer;
-      if (dt && dt.files && dt.files.length) {
+      if (!setBusy && dt && dt.files && dt.files.length) {
         zipInput.files = dt.files;
         zipName();
       }
@@ -1119,6 +1165,7 @@
     const setParsed = parsePrompts(setConcepts.value);
     const prompts = setParsed.map((p) => p.name);
     if (!prompts.length) { batchOut.textContent = "Enter at least one concept above."; return; }
+    busySet(true);
     batchOut.textContent = "Processing… depth runs per photo, so a dozen images take a while.";
     try {
       const fd = new FormData();
@@ -1146,7 +1193,7 @@
         `, ${n} merged feature(s).`;
     } catch (e) {
       batchOut.textContent = `Error: ${e.message}`;
-    }
+    } finally { busySet(false); }
   });
 
   function saveJson(obj, filename) {
@@ -1208,12 +1255,14 @@
         `${lat.toFixed(6)}, ${lon.toFixed(6)} (from ${f.properties.merged_from.map((m) => m.image).join(", ")})`;
       mergedList.appendChild(li);
     });
-    mergedBtn.disabled = feats.length === 0;
+    $("setResultsNote").textContent = `${feats.length} mapped photo feature(s). Build 3D model to explore this ZIP in 3D.`;
     renderBatchPins(feats);
+    setMapSource("photos");
   }
 
   mergedBtn.addEventListener("click", () => {
-    if (lastBatch && lastBatch.merged) downloadVideoArtifact(JSON.stringify(lastBatch.merged), "microgeo-merged.geojson", "application/geo+json");
+    const collection = selectedSetFeatures();
+    if (collection?.features.length) downloadVideoArtifact(JSON.stringify(collection), "microgeo-mapped-features.geojson", "application/geo+json");
   });
 
   function renderBatchPins(feats) {
@@ -1225,9 +1274,11 @@
     const bounds = [];
     feats.forEach((f) => {
       const [lon, lat] = f.geometry.coordinates;
-      window.L.circleMarker([lat, lon], { radius: 8, color: "#b00020" })
+      const marker=window.L.marker([lat, lon], {icon:window.L.divIcon({className:'mapped-feature-tag',html:'',iconSize:[16,16],iconAnchor:[8,8]})})
         .addTo(batchLayers)
         .bindPopup(`<b>${f.properties.label} ×${f.properties.count}</b><br>merged pin`);
+      marker.getElement().addEventListener('mousedown',e=>{e.preventDefault();e.stopPropagation();});
+      marker.on('click',()=>editFeatureTag(f,renderBatch));
       bounds.push([lat, lon]);
     });
     map.fitBounds(bounds, { padding: [20, 20] });
@@ -1259,9 +1310,6 @@
     if (!sfmMap) {
       sfmMap = window.L.map("sfmMap").setView([20, 0], 2);
       registerMap("sfmMap", sfmMap);
-      window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 20, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-      }).addTo(sfmMap);
       new ResizeObserver(() => sfmMap.invalidateSize()).observe($("sfmMap"));
     }
     sfmMapLayers = window.L.layerGroup().addTo(sfmMap);
@@ -1281,6 +1329,60 @@
   // Loaded cloud for viewing + export: Float32Arrays plus parallel
   // label/vote arrays (null label = unlabeled).
   let sfmData = null;
+  let sfmFeatureLayer=null;
+  function drawSfmMappedFeatures(){if(!sfmMap||!sfmData?.features)return;if(!sfmFeatureLayer)sfmFeatureLayer=window.L.layerGroup().addTo(sfmMap);sfmFeatureLayer.clearLayers();sfmLib.addMappedFeaturesToMap(window.L,sfmFeatureLayer,sfmData.features,f=>editFeatureTag(f,drawSfmMappedFeatures));}
+  function selectedSetFeatures() {
+    return setFeatureSource === "photos" ? lastBatch?.merged : sfmData?.features;
+  }
+  function refreshSetExport() {
+    if (currentMode() !== "set-depth" && currentMode() !== "set-3d") return;
+    const features = selectedSetFeatures()?.features || [];
+    $("mergedBtn").disabled = !features.length || setBusy;
+    $("sfmGeoBtn").disabled = !sfmData || setBusy;
+    const note = $("exportNote");
+    note.textContent = features.length
+      ? `${features.length} mapped feature(s) from ${setFeatureSource === "photos" ? "photo mapping" : "3D label summaries"}. Point cloud downloads separately.`
+      : sfmData && setFeatureSource === "model" && !sfmData.georeference?.available
+        ? "Cloud ready. Mapped features need a reliable EXIF GPS fit; PLY/XYZ can still be exported."
+        : "Mapped features need object labels and GPS. Build a model for PLY/XYZ export.";
+  }
+  function setMapSource(source) {
+    setFeatureSource = source;
+    $("setModelMapPanel").hidden = source !== "model";
+    $("setBatchMapPanel").hidden = source !== "photos";
+    $("setModelMapBtn").setAttribute("aria-pressed", String(source === "model"));
+    $("setPhotoMapBtn").setAttribute("aria-pressed", String(source === "photos"));
+    requestAnimationFrame(() => overviewMaps.get(source === "model" ? "sfmMap" : "batchMap")?.invalidateSize());
+    refreshSetExport();
+  }
+  $("setModelMapBtn").addEventListener("click", () => setMapSource("model"));
+  $("setPhotoMapBtn").addEventListener("click", () => setMapSource("photos"));
+  function clearSetResults() {
+    sfmViewer?.dispose(); sfmBookmarks?.hide();
+    $("sfmBookmarksOpen").disabled=true;
+    $("sfmBookmarks").hidden = true;
+    lastBatch = null; sfmData = null; sfmReport = null;
+    cloudMapLayers.get("sfmMap")?.remove(); cloudMapLayers.delete("sfmMap");
+    sfmMapLayers?.clearLayers(); sfmFeatureLayer?.clearLayers(); batchLayers?.clearLayers();
+    $("sfmEmpty").hidden = false;
+    $("sfmOut").textContent = ""; $("batchOut").textContent = "";
+    $("sfmDiagnostics").disabled = true;
+    ["sfmCleanWrap","sfmSamBox","sfmImgWrap","sfmWarn","sfmStats","sfmLog"].forEach(id=>{$(id).hidden=true;});
+    $("batchGrid").replaceChildren(); $("mergedList").replaceChildren();
+    $("sfmMapNote").textContent = "Reconstruct the uploaded ZIP to align its cloud and labelled features.";
+    $("setResultsNote").textContent = "Build a model to explore the cloud, or map photo features for GeoJSON.";
+    refreshSetExport();
+  }
+  function busySet(value) {
+    setBusy = value;
+    ["sfmBtn","zipInput","sfmEngine","sfmUseSam"].forEach(id=>{$(id).disabled=value;});
+    $("zipDrop").setAttribute("aria-disabled",String(value));
+    syncSetLabellingControls(); refreshSetExport();
+  }
+  $("sfmEngine").addEventListener("change", () => {
+    $("sfmDenseRow").hidden = $("sfmEngine").value !== "colmap";
+    $("sfmBackend").hidden = $("sfmEngine").value !== "colmap";
+  });
 
   function sfmEnsureViewer() {
     if (sfmViewer || !sfmLib) return sfmViewer;
@@ -1332,7 +1434,7 @@
       const items = [
         ["Photos placed", `${placed} / ${totalPhotos}`],
         ["Points shown", total > cloudCount ? `${cloudCount} of ${total}` : String(cloudCount)],
-        ["Cloud", dense ? "Dense" : "Sparse"],
+        ["Model", data.model || (dense ? "COLMAP Dense" : "COLMAP Sparse")],
         ["Labelled points", String(nLab)],
         ["Orientations", oriText],
         ["GPU", data.gpu_used ? "Yes" : "No (CPU)"],
@@ -1421,14 +1523,18 @@
       if (!sfmData) { sfmOut.textContent = "Reconstruct a cloud first, then export it."; return; }
       $("sfmExportInfo").textContent =
         `${sfmData.count} points loaded${sfmData.dense ? " (dense)" : " (sparse)"}.`;
-      $("sfmExportDlg").hidden = false;
+      openDlg($("sfmExportDlg"));
     });
     const close = $("sfmExportClose");
-    if (close) close.addEventListener("click", () => { $("sfmExportDlg").hidden = true; });
+    if (close) close.addEventListener("click", () => { $("sfmExportDlg").close(); });
     const go = $("sfmExportGo");
     if (go) go.addEventListener("click", sfmExportDownload);
   }
 
+  $("sfmView").addEventListener('viewer-tool-change',e=>{sfmToolButton('toolOrbit',e.detail.tool==='orbit');sfmToolButton('toolIdentify',e.detail.tool==='identify');});
+  $("sfmRenderMode").onchange=()=>sfmViewer?.setRenderMode($("sfmRenderMode").value);
+  $("sfmDensify").oninput=()=>{ $("sfmDensifyVal").textContent='?'+$("sfmDensify").value;sfmViewer?.setDensify($("sfmDensify").value);};
+  $("sfmView").addEventListener('viewer-display-change',e=>{const d=e.detail;$("sfmRenderMode").value=d.mode;$("sfmDensify").value=d.densify;$("sfmDensifyVal").textContent='?'+d.densify;$("sfmDensify").disabled=d.mode!=='points';$("sfmGeometryInfo").textContent=geometrySummary(d);});
   // SAM stage box: the per-image boxes that fed 3D label voting,
   // shown before the 3D view. data.detections maps image name (or
   // basename) to [{label, box, score}]. Every box is listed with its
@@ -1557,7 +1663,7 @@
       figure.className = "sam-cell";
       const image = document.createElement("img");
       image.src = url;
-      image.alt = `Unlabelled COLMAP input: ${name}`;
+      image.alt = `Unlabelled reconstruction input: ${name}`;
       image.loading = "lazy";
       const caption = document.createElement("figcaption");
       caption.textContent = name;
@@ -1591,7 +1697,7 @@
     document.body.appendChild(a);
     a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
-    $("sfmExportDlg").hidden = true;
+    $("sfmExportDlg").close();
     sfmOut.textContent = `Exported ${idx.length} point(s) as ${ext}.`;
   }
 
@@ -1599,7 +1705,8 @@
     const zf = zipInput.files[0];
     if (!zf) { sfmOut.textContent = "Pick a zip of photos above first."; return; }
     const wantLabels = $("sfmUseSam").checked;
-    const concepts = wantLabels ? setConcepts.value.split(",").map(s => s.trim()).filter(Boolean) : [];
+    const parsedConcepts = parsePrompts(setConcepts.value);
+    const concepts = wantLabels ? parsedConcepts.map(p => p.name) : [];
     const wantDense = $("sfmDense") && $("sfmDense").checked;
     // Progress UI: bar + scrolling log of the live server lines, so a
     // long reconstruction reads as working, not crashed. Cleared here,
@@ -1641,7 +1748,7 @@
     $("sfmCleanWrap").hidden = true;
     if ($("sfmStats")) $("sfmStats").hidden = true;
     if ($("sfmWarn")) $("sfmWarn").hidden = true;
-    sfmBtn.disabled = true;
+    busySet(true);
     paintProgress();
     try {
       const detectorUsed = (setDetector && setDetector.value) || "sam";
@@ -1649,6 +1756,7 @@
       fd.append("zipfile", zf);
       fd.append("concepts", JSON.stringify(concepts));
       fd.append("label_objects", wantLabels ? "1" : "0");
+      fd.append("reconstruction_engine", $("sfmEngine").value);
       fd.append("detector", detectorUsed);
       if (concepts.length) zipDetectorFields(fd);
       fd.append("dense", wantDense ? "1" : "0");
@@ -1725,12 +1833,19 @@
       sfmData = {
         positions: cloud.positions, colors: cloud.colors,
         labels, votes, count: cloud.count, dense, georeference: data.georeference,
+        features: sfmLib.buildMappedFeatures(cloud.positions, labels, votes, data.georeference, geomsMap(parsedConcepts)),
       };
       const viewer = sfmEnsureViewer();
       sfmBookmarks.setScene(cloud.positions);
+      $("sfmBookmarks").hidden = false;
       viewer.setCloud(cloud.positions, cloud.colors,
         sfmLib.labeledColors(cloud.count, dense ? (data.dense_labels || {}) : (data.point_labels || {})),
-        labels, votes, data.cameras || []);
+        labels, votes, data.cameras || [], data.georeference);
+      const sourcePhotos=reconstructionPhotos(data);
+      viewer.setPhotoSources(data.cameras||[],sourcePhotos);
+      $("sfmRenderMode").querySelector('[value="mosaic"]').disabled=!sourcePhotos.length;
+      viewer.setDensify($("sfmDensify").value);viewer.setRenderMode($("sfmRenderMode").value);
+      viewer.setColorMode($("toolColorMode").value);
       viewer.setBrightness($("sfmBrightness").value);
       viewer.setPointSize(Number($("sfmPointSize").value));
       updateCloudMap("sfmMap", cloud, data.georeference, sfmLib);
@@ -1738,26 +1853,28 @@
       $("sfmMapNote").textContent += reference?.available
         ? ` Cloud aligned using ${reference.photos_used.length} photos; GPS fit RMS ${reference.rms_m.toFixed(2)} m.${reference.altitude_assumed_level ? " Camera heights assumed level." : ""}`
         : ` ${reference?.reason || "No geographic cloud alignment available."}`;
-      $("sfmGeoBtn").disabled = false;
+      drawSfmMappedFeatures();
+      setMapSource("model");
       $("sfmEmpty").hidden = true;
       const unreg = (data.unregistered || []).length;
       const nLab = labels.filter(Boolean).length;
       const total = dense ? (data.dense_total || 0) : (data.total_points || 0);
       sfmOut.textContent = `Done — ${cloud.count} 3D point(s)` +
         (total > cloud.count ? ` (from ${total}${dense ? " dense" : ""})` : "") +
-        (dense ? " [dense]" : " [sparse]") +
+        ` [${data.model || (dense ? "COLMAP Dense" : "COLMAP Sparse")}]` +
         ` from ${(data.registered || []).length} placed photo(s)` +
         (unreg ? `, ${unreg} photo(s) COLMAP could not place — they are named in the photo grid below` : "") +
-        (concepts.length ? `, ${nLab} labeled point(s) (no depth pass)` : ", unlabeled cloud") +
+        (concepts.length ? `, ${nLab} labelled point(s)` : ", unlabelled cloud") +
         (data.gpu_used ? " (GPU)." : ".") +
         ((data.warnings || []).length ? " See notes below." : "");
+      $("setResultsNote").textContent = `${data.model || (dense ? "COLMAP Dense" : "COLMAP Sparse")} | ${cloud.count.toLocaleString()} points | ${sfmData.features.features.length} mapped label summaries`;
       renderSfmStats(data, cloud.count, dense, nLab);
       renderSfmSam(data, detectorUsed === "api" ? "Meta API SAM 3.1" : detectorUsed === "clip" ? "Local CLIP" : "Server SAM 3");
       renderSfmSamImages(data);
     } catch (e) {
       sfmOut.textContent = `Error: ${e.message}`;
     } finally {
-      sfmBtn.disabled = false;
+      busySet(false);
       if (prog) prog.hidden = true;
     }
   });
@@ -1771,7 +1888,7 @@
     videoProg = $("videoProg"), videoLog = $("videoLog"),
     videoFeatures = $("videoFeatures"), videoExportBtn = $("videoExportBtn"),
     videoMapNote = $("videoMapNote");
-  let videoViewer = null, videoLib = null, videoMap = null, videoMarkers = null;
+  let videoViewer = null, videoSecondViewer = null, videoLib = null, videoMap = null, videoMarkers = null;
   let videoData = null, videoCloud = null;
   // A single Settings key is shared immediately across every API workflow.
   videoToken.value = tokenInput.value;
@@ -1780,13 +1897,12 @@
     try { localStorage.setItem("mg.token", input.value); } catch (_) { /* private mode */ }
   }));
   $("sfmGeoBtn").addEventListener("click", () => {
-    if (!sfmData || !sfmLib) return;
-    const reference = sfmData.georeference?.available ? sfmData.georeference : null;
-    downloadVideoArtifact(sfmLib.buildGeoJson(sfmData.positions, sfmData.colors, sfmData.labels,
-      sfmData.votes, sfmLib.sampleIndex(sfmData.count,100), reference), "microgeo-cloud.geojson", "application/geo+json");
-    $("exportNote").textContent = reference ? "Exported cloud in WGS84 coordinates." : "No reliable GPS fit: exported local coordinates as properties with null map geometry.";
+    if (!sfmData) return;
+    $("sfmExportInfo").textContent = `${sfmData.count.toLocaleString()} points. PLY/XYZ preserve the reconstruction coordinate frame.`;
+    openDlg($("sfmExportDlg"));
   });
 
+  $("videoUseSam").addEventListener("change", () => {const hide=currentMode()==="video-survey"&&!$("videoUseSam").checked;[videoConcepts,videoDetector].forEach(el=>el.closest("label").hidden=hide);});
   videoDetector.addEventListener("change", () => {
     videoTokenRow.hidden = true;
   });
@@ -1813,14 +1929,16 @@
   }
 
   videoBtn.addEventListener("click", async () => {
-    const zf = videoZip.files[0];
-    if (!zf) { videoOut.textContent = "Pick the zip (1 photo + 1 video) first."; return; }
-    if (videoDetector.value === "api" && !tokenInput.value.trim()) {
+    const surveyMode = currentMode() === "video-survey";
+    const zf = surveyMode ? $("videoOnly").files[0] : videoZip.files[0];
+    if (!zf) { videoOut.textContent = surveyMode ? "Pick a video first." : "Pick the zip (1 photo + 1 video) first."; return; }
+    const useLabels = !surveyMode || $("videoUseSam").checked;
+    if (useLabels && videoDetector.value === "api" && !tokenInput.value.trim()) {
       openDlg(cfgDlg); videoOut.textContent = "Enter your SAM 3.1 API key in Settings."; return;
     }
-    const parsed = parsePrompts(videoConcepts.value);
+    const parsed = useLabels ? parsePrompts(videoConcepts.value) : [];
     const fd = new FormData();
-    fd.append("zipfile", zf);
+    fd.append(surveyMode ? "video" : "zipfile", zf);
     fd.append("concepts", JSON.stringify(parsed.map((p) => p.name)));
     fd.append("max_frames", $("videoMaxFrames").value || "16");
     fd.append("max_points", $("videoMaxPoints").value || "1000000");
@@ -1854,6 +1972,7 @@
       if (data.error) throw new Error(data.error);
       videoData = data;
       await renderVideoResult(data);
+      await attachVideoSurvey();
     } catch (e) {
       videoOut.textContent = `Error: ${e.message}`;
     } finally {
@@ -1881,19 +2000,40 @@
     }
     videoBookmarks.setScene(cloud.positions);
     videoViewer.setCloud(cloud.positions, cloud.colors,
-      videoLib.labeledColors(cloud.count, raw), labels, votes, data.cameras || []);
+      videoLib.labeledColors(cloud.count, raw), labels, votes, data.cameras || [], data.georeference);
+    videoViewer.setColorMode($("videoColorMode").value);
     videoViewer.setCamerasVisible($("videoShowCameras").checked);
     videoViewer.setPointSize(Number($("videoPointSize").value));
     videoViewer.setBrightness($("videoBrightness").value);
+    const sourcePhotos=reconstructionPhotos(data);
+    videoViewer.setPhotoSources(data.cameras||[],sourcePhotos);
+    videoViewer.setDensify($("videoDensify").value);
+    $("videoRenderMode").querySelector('[value="mosaic"]').disabled=!sourcePhotos.length;
     videoViewer.setGaussians(data.gaussians || null);
     $("videoRenderMode").querySelector('[value="gaussians"]').disabled = !data.gaussians;
     $("videoRenderMode").value = data.gaussians ? "gaussians" : "points";
     videoViewer.setRenderMode($("videoRenderMode").value);
+    videoViewer.setCameraSettings({metric:!!data.metric,depthScale:data.georeference?.scale_m_per_unit||1,depthMin:0,depthMax:Infinity});
     videoViewer.fitBounds();
+    if (!videoSecondViewer) videoSecondViewer = videoLib.createViewer($("videoSecondView"));
+    videoSecondViewer.setCloud(cloud.positions, cloud.colors,
+      videoLib.labeledColors(cloud.count, raw), labels, votes, data.cameras || [], data.georeference);
+    videoSecondViewer.setPhotoSources(data.cameras||[],sourcePhotos);
+    videoSecondViewer.setRenderMode('points');videoSecondViewer.setDensify($("videoDensify").value);
+    videoSecondViewer.setColorMode($("videoColorMode").value);
+    videoSecondViewer.setCamerasVisible($("videoShowCameras").checked);
+    videoSecondViewer.setPointSize(Number($("videoPointSize").value));
+    videoSecondViewer.setBrightness($("videoBrightness").value);
+    videoSecondViewer.setPreset($("videoSecondPreset").value);
+    videoSecondViewer.setCameraSettings({metric:!!data.metric,depthScale:data.georeference?.scale_m_per_unit||1,depthMin:0,depthMax:Infinity});
+    $("videoSecondEmpty").hidden = true;
+    document.body.classList.add("has-video-cloud");
+    if(currentMode()==="video-survey") $("videoSetup").open=false;
     $("videoEmpty").hidden = true;
     $("videoPlyBtn").disabled = false;
     $("videoDiagnosticsBtn").disabled = false;
     const feats = data.features || [];
+    videoFeatures.hidden = currentMode() === "video-survey";
     videoFeatures.innerHTML = "";
     if (!feats.length) {
       videoFeatures.innerHTML = '<li class="hint">No map features — no photo EXIF fix/heading, or no concept boxes matched the cloud.</li>';
@@ -1916,6 +2056,7 @@
     videoMapNote.textContent += data.georeference?.available
       ? " Metric cloud overlaid using the photo GPS and heading; first view assumed level."
       : ` ${data.georeference?.reason || "No geographic alignment available."}`;
+    if(currentMode()==="video-survey"&&!data.georeference?.available)videoMapNote.textContent="Add cloud/map control pairs to register this cloud.";
     videoExportBtn.disabled = !feats.length;
     $("videoCloudGeoBtn").disabled = false;
     const nLab = labels.filter(Boolean).length;
@@ -1926,15 +2067,114 @@
       (data.warnings && data.warnings.length ? `. ${data.warnings.join(" ")}` : ".");
   }
 
+  let videoSurvey = null, surveyMarkers = null;
+  async function attachVideoSurvey() {
+    $("secVideo").insertBefore($("videoSurveyTools"),$("secVideo").querySelector(".video-result-layout"));
+    if (!videoSurvey) {
+      const {createVideoSurvey} = await import("./video-survey.js");
+      videoSurvey = createVideoSurvey({host: $("videoSurveyTools"),
+        getContext: () => ({viewer: videoViewer, viewers: [videoViewer,videoSecondViewer], cloud: videoCloud, data: videoData, map: videoMap}),
+        onReference: reference => {
+          videoData.georeference = reference;
+          videoViewer.setMeasurement([]);
+          videoSecondViewer?.setMeasurement([]);
+          [videoViewer,videoSecondViewer].forEach(v=>v?.setGroundReference(reference));
+          [videoViewer,videoSecondViewer].forEach(v=>v?.setCameraSettings({depthScale:reference.scale_m_per_unit||1,metric:reference.available||!!videoData.metric,depthMin:0,depthMax:Infinity}));
+          updateCloudMap("videoMap", videoCloud, reference, videoLib);
+          videoMapNote.textContent = reference.available ? `Manual registration - RMS ${reference.rms_m.toFixed(2)} m. ${reference.method}` : reference.reason;
+        },
+        onTags: features => {
+          if (!videoMap) return;
+          if (!surveyMarkers) surveyMarkers = window.L.layerGroup().addTo(videoMap);
+          surveyMarkers.clearLayers();
+          features.forEach((f,i) => {const text=document.createElement("span");text.textContent=`${f.properties.name} / ${f.properties.indoor ? "Indoor / floor " + f.properties.floor : "Outdoor"}`;
+            const marker=window.L.marker([f.geometry.coordinates[1],f.geometry.coordinates[0]],{draggable:true,icon:window.L.divIcon({className:'survey-tag-marker',html:'',iconSize:[14,14]})}).addTo(surveyMarkers).bindTooltip(text);
+            marker.on('click',()=>videoSurvey.editTag(i));marker.on('dragend',()=>{const p=marker.getLatLng();videoSurvey.moveTag(i,p.lat,p.lng);});});
+        }});
+    }
+    videoSurvey.attach(); videoSurvey.reset();
+  }
+
   $("videoShowCameras").addEventListener("change", () => {
     videoViewer?.setCamerasVisible($("videoShowCameras").checked);
+    videoSecondViewer?.setCamerasVisible($("videoShowCameras").checked);
   });
+  [$("videoView"),$("videoSecondView")].forEach(host=>host.addEventListener('viewer-tool-change',e=>{if(currentMode()==='video-survey'&&videoSurvey)videoSurvey.setTool(e.detail.tool);else [videoViewer,videoSecondViewer].forEach(view=>view?.setTool(e.detail.tool));}));
+  $("videoDensify").oninput=()=>{const multiplier=$("videoDensify").value;$("videoDensifyVal").textContent='?'+multiplier;videoViewer?.setDensify(multiplier);videoSecondViewer?.setDensify(multiplier);};
+  $("videoView").addEventListener('viewer-display-change',e=>{const d=e.detail;$("videoRenderMode").value=d.mode;$("videoDensify").value=d.densify;$("videoDensifyVal").textContent='?'+d.densify;$("videoDensify").disabled=d.mode!=='points';$("videoGeometryInfo").textContent=geometrySummary(d);});
   $("videoPointSize").addEventListener("input", () => {
     videoViewer?.setPointSize(Number($("videoPointSize").value));
+    videoSecondViewer?.setPointSize(Number($("videoPointSize").value));
   });
-  $("videoBrightness").addEventListener("input", () => videoViewer?.setBrightness($("videoBrightness").value));
-  $("videoRenderMode").addEventListener("change", () => videoViewer?.setRenderMode($("videoRenderMode").value));
+  $("videoColorMode").addEventListener("change", () => {
+    if ($("videoColorMode").value === "class" && $("videoRenderMode").value === "gaussians") { $("videoRenderMode").value = "points"; videoViewer?.setRenderMode("points"); }
+    videoViewer?.setColorMode($("videoColorMode").value);
+    videoSecondViewer?.setColorMode($("videoColorMode").value);
+  });
+  $("videoBrightness").addEventListener("input", () => {videoViewer?.setBrightness($("videoBrightness").value);videoSecondViewer?.setBrightness($("videoBrightness").value);});
+  $("videoRenderMode").addEventListener("change", () => {
+    if ($("videoRenderMode").value === "gaussians" && $("videoColorMode").value === "class") { $("videoColorMode").value = "photo"; videoViewer?.setColorMode("photo"); }
+    videoViewer?.setRenderMode($("videoRenderMode").value);
+  });
   $("videoFit").addEventListener("click", () => { videoViewer?.cancelFlight(); videoViewer?.fitBounds(); });
+  $("videoSecondFloat").onclick=()=>floatVideoOverview();
+  $("videoSecondPreset").addEventListener("change", () => videoSecondViewer?.setPreset($("videoSecondPreset").value));
+  $("videoSecondCopy").addEventListener("click", () => {const pose=videoViewer?.getPose();if(pose)videoSecondViewer?.flyTo(pose,300);});
+  let currentVideoProjectId=null,currentVideoProjectName='',projectStatusTimer=null;
+  const projectSettingIds=['videoColorMode','videoBrightness','videoShowCameras','videoSecondPreset','videoPointSize','videoRenderMode','videoDensify','videoOutput','videoConcepts','videoDetector','videoMaxFrames','videoMaxPoints','videoSampleFps','videoResolution','videoUseSam','videoConsistency','videoFilterBlack','videoSkipTitles'];
+  function videoProjectSettings(){return Object.fromEntries(projectSettingIds.map(id=>{const el=$(id);return [id,el.type==='checkbox'?el.checked:el.value];}));}
+  function restoreVideoProjectSettings(settings){for(const [id,value] of Object.entries(settings||{})){if(!projectSettingIds.includes(id))continue;const el=$(id);if(el.type==='checkbox')el.checked=!!value;else el.value=value;}$("videoUseSam").dispatchEvent(new Event('change'));}
+  async function projectStore(){return (await import('./project-store.js')).projectStore;}
+  function projectStatus(message){const el=$("videoProjectStatus");el.textContent=message;el.classList.add('show');clearTimeout(projectStatusTimer);projectStatusTimer=setTimeout(()=>el.classList.remove('show'),5000);}
+  function requestProjectName(title,name='',confirm='Save'){
+    const dialog=$("videoProjectNameDialog"),input=$("videoProjectName");$("videoProjectNameTitle").textContent=title;$("videoProjectNameConfirm").textContent=confirm;input.value=name;input.setCustomValidity('');
+    return new Promise(resolve=>{let result=null;dialog.onclose=()=>resolve(result);$("videoProjectNameCancel").onclick=()=>dialog.close();
+      input.oninput=()=>input.setCustomValidity('');$("videoProjectNameForm").onsubmit=e=>{e.preventDefault();if(!input.value.trim()){input.setCustomValidity('Enter a project name.');input.reportValidity();return;}result=input.value.trim();dialog.close();};
+      dialog.showModal();input.focus();input.select();
+    });
+  }
+  async function refreshVideoProjects(){
+    const rows=await (await projectStore()).list(),list=$("videoProjectList");list.replaceChildren();
+    $("videoProjectCurrent").textContent=currentVideoProjectName||'Projects';$("videoProjectCurrent").title=currentVideoProjectName||'Choose a saved project';
+    if(!rows.length){const empty=document.createElement('p');empty.textContent='No saved projects yet.';list.append(empty);}
+    rows.forEach(row=>{
+      const item=document.createElement('div');item.className='project-menu-row';item.dataset.projectId=row.id;item.setAttribute('role','listitem');item.classList.toggle('current',row.id===currentVideoProjectId);
+      const load=document.createElement('button');load.type='button';load.className='project-load';load.textContent=row.name;load.title='Load '+row.name;load.onclick=()=>projectAction(()=>loadVideoProject(row.id));
+      const rename=document.createElement('button');rename.type='button';rename.textContent='Rename';rename.className='project-rename';rename.setAttribute('aria-label','Rename '+row.name);rename.onclick=()=>projectAction(async()=>{
+        $("videoProjectMenu").open=false;const name=await requestProjectName('Rename project',row.name,'Rename');if(name===null)return;
+        const saved=await (await projectStore()).rename(row.id,name);if(row.id===currentVideoProjectId)currentVideoProjectName=saved.name;await refreshVideoProjects();projectStatus('Renamed project to '+saved.name+'.');
+      });
+      const remove=document.createElement('button');remove.type='button';remove.textContent='×';remove.className='project-delete';remove.setAttribute('aria-label','Delete '+row.name);remove.title='Delete saved project';remove.onclick=()=>projectAction(async()=>{
+        await (await projectStore()).delete(row.id);if(currentVideoProjectId===row.id){currentVideoProjectId=null;currentVideoProjectName='';}await refreshVideoProjects();$("videoProjectMenu").open=false;projectStatus('Saved project deleted. The open survey remains available.');
+      });
+      item.append(load,rename,remove);list.append(item);
+    });
+  }
+  async function projectAction(action){$("videoProjectSave").disabled=true;try{await action();}catch(error){projectStatus('Project action failed: '+error.message);}finally{$("videoProjectSave").disabled=false;}}
+  for(const [id,asNew] of [['videoProjectSave',false],['videoProjectSaveAs',true]])$(id).onclick=()=>projectAction(async()=>{
+    if(!videoData||!videoSurvey)throw Error('Build or load a cloud first.');$("videoProjectMenu").open=false;
+    const name=await requestProjectName(asNew?'Save as new project':'Save project',asNew?'':currentVideoProjectName);if(name===null)return;
+    const saved=await (await projectStore()).save({id:asNew?null:currentVideoProjectId,name,format:1,densifyUnits:'multiplier',appVersion:document.querySelector('.ver').textContent.replace(/^v/,''),data:videoData,survey:videoSurvey.snapshot(),settings:videoProjectSettings(),
+      views:[videoViewer,videoSecondViewer].map(v=>({pose:v.getPose(),settings:v.getCameraSettings()})),map:{center:videoMap.getCenter(),zoom:videoMap.getZoom()},overview:{floating:$("videoSecondPane").classList.contains('floating-overview'),layout:videoOverviewWindow?.getLayout()}});
+    currentVideoProjectId=saved.id;currentVideoProjectName=saved.name;await refreshVideoProjects();projectStatus('Saved '+saved.name+' in this browser.');
+  });
+  async function loadVideoProject(id){
+    $("videoProjectMenu").open=false;const project=await (await projectStore()).get(id);if(!project?.data?.ply)throw Error('Saved project has no cloud.');
+    if(project.densifyUnits!=='multiplier'){
+      if(project.settings?.videoDensify!==undefined)project.settings.videoDensify=Number(project.settings.videoDensify)/100;
+      for(const view of project.views||[])if(view.settings?.densify!==undefined)view.settings.densify=Number(view.settings.densify)/100;
+    }
+    dockVideoOverview();restoreVideoProjectSettings(project.settings);videoData=project.data;await renderVideoResult(videoData);await attachVideoSurvey();videoSurvey.restore(project.survey);
+    for(const [i,view] of [videoViewer,videoSecondViewer].entries()){if(project.views?.[i]?.settings)view.setCameraSettings(project.views[i].settings);if(project.views?.[i]?.pose)await view.flyTo(project.views[i].pose,1);}
+    if(project.map)videoMap.setView(project.map.center,project.map.zoom);if(project.overview?.floating)await floatVideoOverview(project.overview.layout);
+    currentVideoProjectId=id;currentVideoProjectName=project.name;await refreshVideoProjects();projectStatus('Loaded '+project.name+'.');
+  }
+  refreshVideoProjects().catch(error=>projectStatus('Project storage unavailable: '+error.message));
+  document.addEventListener('pointerdown',e=>{if(!$("videoProjectMenu").contains(e.target))$("videoProjectMenu").open=false;});
+  const divider=$("videoPaneDivider");let splitting=false;
+  function resizeVideoPanes(x){const rect=divider.parentElement.getBoundingClientRect(),width=Math.max(22,Math.min(48,(rect.right-x)/rect.width*100));divider.parentElement.style.setProperty('--map-width',width+'%');}
+  divider.onpointerdown=e=>{splitting=true;divider.setPointerCapture(e.pointerId);e.preventDefault();};divider.onpointermove=e=>{if(splitting)resizeVideoPanes(e.clientX);};divider.onpointerup=divider.onpointercancel=()=>splitting=false;
+  divider.onkeydown=e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight'){const rect=divider.getBoundingClientRect();resizeVideoPanes(rect.left+(e.key==='ArrowLeft'?-24:24));e.preventDefault();}};
   function downloadVideoArtifact(text, filename, type) {
     const url = URL.createObjectURL(new Blob([text], { type }));
     const a = document.createElement("a");
@@ -1957,9 +2197,6 @@
     if (!videoMap) {
       videoMap = window.L.map("videoMap", { maxZoom: 22 }).setView([20, 0], 2);
       registerMap("videoMap", videoMap);
-      window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 22, maxNativeZoom: 19, attribution: "&copy; OpenStreetMap contributors"
-      }).addTo(videoMap);
       videoMarkers = window.L.layerGroup().addTo(videoMap);
     }
     videoMarkers.clearLayers();
@@ -1978,7 +2215,8 @@
         f.endpoints.forEach((e) => bounds.push([e.lat, e.lon]));
       } else {
         const p = f.snapped || f;
-        window.L.marker([p.lat, p.lon]).addTo(videoMarkers).bindPopup(desc);
+        const marker=window.L.marker([p.lat, p.lon]).addTo(videoMarkers).bindPopup(desc);
+        marker.on('click',()=>openMapTagEditor({name:f.name||f.label,lat:p.lat,lon:p.lon,indoor:f.indoor,floor:f.floor,onSave:value=>{Object.assign(f,{name:value.name,label:value.name,lat:value.lat,lon:value.lon,indoor:value.indoor,floor:value.floor});delete f.snapped;renderVideoMap(videoData);}}));
         bounds.push([p.lat, p.lon]);
       }
     });
@@ -2289,6 +2527,7 @@
   // Effective positions: path-snapped when Snap-to-path moved the pin,
   // else the server pin (building-outline snap, else projection).
   function effPin(b) {
+    if (b.editedPin) return {...b.editedPin,kind:"edited"};
     if (b.pathPin) return { lon: b.pathPin.lon, lat: b.pathPin.lat, kind: "path" };
     return pinOf(b);
   }
@@ -2520,19 +2759,6 @@
     if (!map) {
       map = window.L.map("map", { maxZoom: 22 }).setView([20, 0], 2);
       registerMap("map", map);
-      const base = {
-        "Streets": window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-          maxZoom: 22, maxNativeZoom: 19, attribution: "&copy; OpenStreetMap contributors"
-        }),
-        "Aerial (Esri)": window.L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
-          maxZoom: 22, maxNativeZoom: 19, attribution: "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics"
-        }),
-        "B&W (Stamen)": window.L.tileLayer("https://tiles.stadiamaps.com/tiles/stamen_toner/{z}/{x}/{y}{r}.png", {
-          maxZoom: 22, maxNativeZoom: 20, attribution: "&copy; Stadia Maps &copy; Stamen Design &copy; OpenMapTiles &copy; OpenStreetMap contributors"
-        }),
-      };
-      base["Streets"].addTo(map);
-      window.L.control.layers(base).addTo(map);
       map.on("click", measureClick);
     }
     if (mapLayers) mapLayers.remove();
@@ -2564,8 +2790,9 @@
           `<b>${b.label}</b> (line)<br>${g.distance_m.toFixed(1)} m @ ${g.bearing_deg.toFixed(1)}°${enu}${snap}${osm}${path}`);
         bounds.push([ends[0].lat, ends[0].lon], [ends[1].lat, ends[1].lon]);
       } else {
-        window.L.marker([p.lat, p.lon]).addTo(mapLayers).bindPopup(
+        const tagMarker=window.L.marker([p.lat, p.lon]).addTo(mapLayers).bindPopup(
           `<b>${b.label}</b><br>${g.distance_m.toFixed(1)} m @ ${g.bearing_deg.toFixed(1)}°${enu}${snap}${osm}${path}`);
+        tagMarker.on('click',()=>openMapTagEditor({name:b.label,lat:p.lat,lon:p.lon,indoor:b.indoor,floor:b.floor,onSave:value=>{b.label=value.name;b.indoor=value.indoor;b.floor=value.floor;b.editedPin={lat:value.lat,lon:value.lon};renderList();renderMap();}}));
         bounds.push([p.lat, p.lon]);
       }
       if (p.kind === "path") {

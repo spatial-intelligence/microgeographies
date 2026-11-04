@@ -12,6 +12,9 @@ import {readFileSync} from 'fs';
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+const release=html.match(/class="ver">v([\d.]+)/)?.[1];
+assert.ok(release,'Visible app release must be present');
+assert.ok(readFileSync(new URL('../sw.js',import.meta.url),'utf8').includes(`"microgeo-v${release}"`),'Offline shell cache must use the visible app release');
 
 // Every id is unique (the DOM was regrouped; duplicates would rewire $()).
 const ids = [];

@@ -1,5 +1,55 @@
 const EARTH_R = 6371000;
 
+// Semantic summaries are grouped by label, rather than exporting every cloud
+// sample as a separate feature. They are not individual object instances.
+export function buildMappedFeatures(positions, labels, votes, reference, geoms = {}) {
+  const collection = {type: "FeatureCollection", features: [], georeference: reference || null,
+    aggregation: "Per-label centroid or principal-axis line"};
+  if (!reference?.available) return collection;
+  const groups = new Map();
+  for (let i=0;i<labels.length;i++) {
+    if (!labels[i]) continue;
+    let group = groups.get(labels[i]);
+    if (!group) { group = {indices:[], sum:[0,0,0], votes:0}; groups.set(labels[i],group); }
+    group.indices.push(i); group.votes += votes[i] || 0;
+    for (let k=0;k<3;k++) group.sum[k] += positions[i*3+k];
+  }
+  for (const [label, group] of groups) {
+    const centroid = new Float64Array(group.sum.map(value=>value/group.indices.length));
+    let geometry = {type:"Point",coordinates:geographicPoint(centroid,0,reference)};
+    if (geoms[label.toLowerCase()] === "line" && group.indices.length >= 2) {
+      // Principal horizontal axis in ENU metres, using the fitted transform.
+      const enu = i => reference.matrix.slice(0,2).map(row=>row.reduce((v,m,k)=>v+m*(positions[i*3+k]-centroid[k]),0));
+      let xx=0,xy=0,yy=0;
+      for(const i of group.indices) {const [e,n]=enu(i);xx+=e*e;xy+=e*n;yy+=n*n;}
+      const angle=.5*Math.atan2(2*xy,xx-yy), axis=[Math.cos(angle),Math.sin(angle)];
+      let lo=Infinity,hi=-Infinity,first=group.indices[0],last=first;
+      for(const i of group.indices) {const p=enu(i),t=p[0]*axis[0]+p[1]*axis[1]; if(t<lo){lo=t;first=i;}if(t>hi){hi=t;last=i;}}
+      if(hi-lo>1e-6) geometry={type:"LineString",coordinates:[geographicPoint(positions,first,reference),geographicPoint(positions,last,reference)]};
+    }
+    collection.features.push({type:"Feature",geometry,properties:{label,point_count:group.indices.length,
+      votes:group.votes,source:"Reconstructed labelled cloud",aggregation:collection.aggregation}});
+  }
+  return collection;
+}
+
+export function addMappedFeaturesToMap(L, layer, collection, onEdit = null) {
+  if (!L || !layer) return;
+  for (const feature of collection.features) {
+    const popup=document.createElement("span");
+    popup.textContent=`${feature.properties.label} · ${feature.properties.point_count} cloud points (label summary)`;
+    const geometry=feature.geometry;
+    if(geometry.type === "Point") {
+      const marker=L.marker([geometry.coordinates[1],geometry.coordinates[0]],
+        {icon:L.divIcon({className:'mapped-feature-tag',html:'',iconSize:[16,16],iconAnchor:[8,8]})}).addTo(layer).bindPopup(popup);
+      // Avoid native focus scrolling a nested map panel between down/up.
+      marker.getElement().addEventListener('mousedown',e=>{e.preventDefault();e.stopPropagation();});
+      if(onEdit)marker.on('click',()=>onEdit(feature));
+    }
+    else L.polyline(geometry.coordinates.map(c=>[c[1],c[0]]),{color:"#0891b2",weight:4}).addTo(layer).bindPopup(popup);
+  }
+}
+
 export function geographicPoint(positions, index, reference) {
   const p = Array.from(positions.subarray(index*3,index*3+3));
   const enu = reference.matrix.map((row,k) => row.reduce((sum,v,j)=>sum+v*p[j],reference.translation[k]));

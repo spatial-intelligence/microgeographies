@@ -1,0 +1,62 @@
+const {chromium}=require('playwright');
+const assert=require('node:assert/strict');
+const fs=require('node:fs/promises');
+
+(async()=>{
+  const browser=await chromium.launch({channel:process.env.BROWSER_CHANNEL||'msedge',headless:true});
+  try{
+    const page=await browser.newPage({serviceWorkers:'block',viewport:{width:1680,height:1100}}),errors=[];
+    page.setDefaultTimeout(12000);page.on('pageerror',e=>errors.push(e.message));
+    page.on('console',m=>{if(m.type()==='error'&&/WebGLProgram|geometry worker|source photo/i.test(m.text()))errors.push(m.text());});
+    const vertices=Array.from({length:1600},(_,i)=>[(i%40)/10-2,Math.floor(i/40)/10-2,4+Math.sin(i%40/12)*.1]);
+    const ply=['ply','format ascii 1.0','element vertex 1600','property float x','property float y','property float z','property uchar red','property uchar green','property uchar blue','end_header',...vertices.map((p,i)=>[...p,100+(i%40)*3,120+Math.floor(i/40)*3,180].join(' '))].join('\n');
+    const cameras=[{image:'a.jpg',qvec:[1,0,0,0],tvec:[0,0,0],model:'PINHOLE',width:400,height:320,params:[320,320,200,160]},
+      {image:'b.jpg',qvec:[Math.cos(.1),0,Math.sin(.1),0],tvec:[-.6,0,0],model:'PINHOLE',width:400,height:320,params:[320,320,200,160]}];
+    const frames=cameras.map((c,i)=>({image:c.image,depth:new Array(1024).fill(4),url:'data:image/svg+xml,'+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="320"><rect width="400" height="320" fill="${i?'#286ca8':'#a86426'}"/><path d="M20 260L130 45L270 225L375 50" fill="none" stroke="${i?'#7ee7e0':'#ffe4a4'}" stroke-width="25"/><text x="35" y="300" fill="white" font-size="40">PHOTO ${i+1}</text></svg>`)}));
+    const result={ply,cameras,source_frames:frames,frames:2,metric:true,features:[],point_labels:Object.fromEntries(vertices.map((_,i)=>[i,{label:i%2?'Printer':'Bin',votes:1}])),georeference:{available:false},model:'mock'};
+    await page.route('**/api/health',r=>r.fulfill({json:{}}));
+    await page.route('**/api/video-cloud',r=>r.fulfill({contentType:'application/x-ndjson',body:JSON.stringify({type:'result',data:result})+'\n'}));
+    await page.goto('http://127.0.0.1:9517/?workflow=video-survey');
+    assert.equal(await page.title(),'MicroGeo Tool v0.36');
+    await page.locator('#videoOnly').setInputFiles({name:'clip.mp4',mimeType:'video/mp4',buffer:Buffer.from('stub')});await page.locator('#videoBtn').click();await page.waitForSelector('#videoView canvas');
+    await page.locator('#videoDensify').fill('0.4');await page.waitForFunction(()=>Number(document.querySelector('#videoView').getAttribute('data-pseudo-count'))>0);
+    assert.equal(await page.locator('#videoDensify').getAttribute('max'),'1000');assert.equal(await page.locator('#videoDensifyVal').textContent(),'?0.4');
+    const partial=Number(await page.locator('#videoView').getAttribute('data-pseudo-count'));
+    await page.locator('#videoDensify').fill('1');await page.waitForFunction(n=>Number(document.querySelector('#videoView').getAttribute('data-pseudo-count'))>n,partial);
+    assert.match(await page.locator('#videoGeometryInfo').textContent(),/original.*synthetic/);
+    let denseCount=Number(await page.locator('#videoView').getAttribute('data-pseudo-count'));assert(denseCount<=400000);
+    await page.locator('#videoDensify').fill('10');await page.waitForFunction(n=>Number(document.querySelector('#videoView').getAttribute('data-pseudo-count'))>n,denseCount);denseCount=Number(await page.locator('#videoView').getAttribute('data-pseudo-count'));assert(denseCount<=2000000);
+    await page.locator('#videoView .viewer-class-legend > summary').click();assert.equal(await page.locator('#videoView .viewer-class-legend li').count(),2);assert.match(await page.locator('#videoView .viewer-class-legend').textContent(),/Printer/);await page.locator('#videoColorMode').selectOption('class');
+    await page.screenshot({path:'tmp-probe/synthetic-cloud-review.png',fullPage:true});
+    await page.locator('#videoRenderMode').selectOption('tin');await page.waitForFunction(()=>Number(document.querySelector('#videoView').getAttribute('data-tin-triangles'))>0);
+    const fine=Number(await page.locator('#videoView').getAttribute('data-tin-triangles'));
+    await page.locator('#videoPointSize').fill('2');await page.waitForFunction(n=>{const t=Number(document.querySelector('#videoView').getAttribute('data-tin-triangles'));return t>0&&t<n;},fine);
+    await page.locator('#videoPointSize').fill('0.5');await page.waitForFunction(n=>Number(document.querySelector('#videoView').getAttribute('data-tin-triangles'))===n,fine);
+    const panel=page.locator('#videoView .viewer-camera-panel');await panel.locator('summary').click();await panel.locator('[data-tin-wireframe]').check();await panel.locator('[data-ground-barrier]').check();await panel.locator('summary').click();await page.waitForTimeout(220);
+    await page.screenshot({path:'tmp-probe/tin-cloud-review.png',fullPage:true});
+    await page.locator('#videoRenderMode').selectOption('mosaic');await page.waitForFunction(()=>Number(document.querySelector('#videoView').getAttribute('data-mosaic-photos'))===2);
+    await page.waitForTimeout(100);await page.screenshot({path:'tmp-probe/photo-mosaic-review.png',fullPage:true});
+    await panel.locator('summary').click();await panel.locator('[data-mosaic-opacity]').fill('0.4');await panel.locator('summary').click();
+    await page.locator('#videoSecondFloat').click();await page.locator('#videoSecondView .viewer-camera-panel > summary').click();await page.locator('#videoSecondView [data-render-mode]').selectOption('tin');
+    await page.waitForFunction(()=>Number(document.querySelector('#videoSecondView').getAttribute('data-tin-triangles'))>0);await page.locator('#videoSecondView .viewer-camera-panel > summary').click();
+    assert.equal(await page.locator('#videoView').getAttribute('data-display-mode'),'mosaic','Overview mode is independent');
+    const downloadWait=page.waitForEvent('download');await page.locator('#videoPlyBtn').click();const download=await downloadWait;
+    assert((await fs.readFile(await download.path(),'utf8')).includes('element vertex 1600'),'Interpolation never replaces the original export');
+    await page.waitForSelector('#videoOverviewWindow');
+    const originalWindow=await page.locator('#videoOverviewWindow').boundingBox(),header=page.locator('#videoOverviewWindow .tool-window-header'),headerBox=await header.boundingBox();
+    await page.mouse.move(headerBox.x+100,headerBox.y+15);await page.mouse.down();await page.mouse.move(headerBox.x+190,headerBox.y+55,{steps:8});await page.mouse.up();
+    const movedWindow=await page.locator('#videoOverviewWindow').boundingBox();assert(movedWindow.x>originalWindow.x,'Floating overview can be moved');
+    await page.mouse.move(movedWindow.x+movedWindow.width-4,movedWindow.y+movedWindow.height-4);await page.mouse.down();await page.mouse.move(movedWindow.x+movedWindow.width+70,movedWindow.y+movedWindow.height+55,{steps:10});await page.mouse.up();
+    assert((await page.locator('#videoOverviewWindow').boundingBox()).width>movedWindow.width,'Floating overview can be resized');
+    await page.getByRole('button',{name:'Close Second 3D view',exact:true}).click();assert(await page.locator('#videoOverviewWindow').isHidden());assert(await page.locator('#videoSecondPane').isHidden());assert.equal(await page.locator('#videoSecondFloat').getAttribute('aria-expanded'),'false');
+    await page.locator('#videoSecondFloat').click();
+    await page.locator('#videoProjectSave').click();await page.locator('#videoProjectName').fill('Mesh and mosaic');await page.locator('#videoProjectNameConfirm').click();await page.waitForFunction(()=>document.querySelector('#videoProjectStatus').textContent.startsWith('Saved Mesh and mosaic'));
+    await page.reload({waitUntil:'domcontentloaded'});await page.waitForFunction(()=>document.querySelectorAll('#videoProjectList .project-menu-row').length===1);await page.locator('#videoProjectMenu > summary').click();await page.getByRole('button',{name:'Mesh and mosaic',exact:true}).click();
+    await page.waitForFunction(()=>document.querySelector('#videoProjectStatus').textContent.startsWith('Loaded Mesh and mosaic'));
+    await page.waitForFunction(()=>Number(document.querySelector('#videoView').getAttribute('data-mosaic-photos'))===2&&Number(document.querySelector('#videoSecondView').getAttribute('data-tin-triangles'))>0);
+    assert.equal(await page.locator('#videoRenderMode').inputValue(),'mosaic');assert.equal(await page.locator('#videoDensify').inputValue(),'10');assert(await page.locator('#videoOverviewWindow').isVisible());assert(await page.locator('#videoView .viewer-class-legend').evaluate(e=>e.open));
+    assert.equal(await page.locator('#videoView [data-mosaic-opacity]').inputValue(),'0.4');assert(await page.locator('#videoView [data-ground-barrier]').isChecked());assert.equal(await page.locator('#videoSecondView [data-ground-barrier]').isChecked(),false,'Barrier settings are independent per camera');
+    await page.locator('#videoRenderMode').selectOption('points');await page.locator('#videoDensify').fill('0');await page.waitForFunction(()=>document.querySelector('#videoView').getAttribute('data-pseudo-count')==='0');
+    assert.deepEqual(errors,[]);console.log(`Cloud representations: ${denseCount} pseudo-points, ${fine} TIN faces, density slider, oriented textures, independent overview, original export and project reload passed.`);
+  }finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exitCode=1;});

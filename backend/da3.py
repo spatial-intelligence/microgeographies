@@ -181,7 +181,7 @@ def extract_frames(video_path, out_dir, max_frames=16, max_dim=1280,
     return out
 
 
-def _load_da3(model_id=None):
+def _load_da3(model_id=None, force_cpu=False):
     """Lazy DepthAnything3 instance; clear error when not installed."""
     global _da3_model, _da3_model_id
     model_id = model_id or DA3_MODEL_ID
@@ -197,7 +197,13 @@ def _load_da3(model_id=None):
             "addict` (plus a CUDA GPU and ~7 GB of weights on first "
             "use), or run with MOCK_DA3=1 for the offline pass") from e
     import torch
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if _da3_model is not None:
+        _da3_model = None
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    device = "cuda" if not force_cpu and torch.cuda.is_available() else "cpu"
     _da3_model = DepthAnything3.from_pretrained(model_id).to(device)
     _da3_model_id = model_id
     return _da3_model
@@ -234,7 +240,7 @@ def _mock_scene(frame_pils):
             "is_metric": True, "model": "mock-da3", "mock": True}
 
 
-def estimate_scene(frames, emit=None, resolution="low", infer_gs=False):
+def estimate_scene(frames, emit=None, resolution="low", infer_gs=False, model_id=None, force_cpu=False):
     """Run DA3 (or the mock) over extracted frames.
 
     ``frames``: [{"name", "path"}] from extract_frames. Returns
@@ -257,7 +263,10 @@ def estimate_scene(frames, emit=None, resolution="low", infer_gs=False):
     method = "lower_bound_resize" if resolution == "high" else "upper_bound_resize"
     # One model/GPU batch at a time, including lazy loading.
     with _inference_lock:
-        model = _load_da3()
+        model = _load_da3(model_id, force_cpu=True) if force_cpu else (_load_da3(model_id) if model_id else _load_da3())
+        # Test doubles without .to() still exercise the inference contract.
+        if hasattr(model, "to"):
+            model = model.to("cpu" if force_cpu or not torch.cuda.is_available() else "cuda")
         device = next(model.parameters()).device
         gpu_name = torch.cuda.get_device_name(device) if device.type == "cuda" else None
         if emit:
@@ -292,7 +301,7 @@ def estimate_scene(frames, emit=None, resolution="low", infer_gs=False):
             "device": str(device), "gpu_name": gpu_name,
             "process_res_method": method,
             "ref_view_strategy": "first",
-            "model": _da3_model_id, "mock": False}
+            "model": model_id or _da3_model_id, "mock": False}
 
 
 def serialize_gaussians(gaussians, cap=100000):

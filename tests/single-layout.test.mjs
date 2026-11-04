@@ -110,9 +110,10 @@ for (const fn of ['parsePrompts', 'geomsField', 'loadOsm', 'matchOsm', 'snapToPa
                   'updateOsm', 'setMeasuring', 'showTip', 'effPin', 'effEnds']) {
   assert.ok(app.indexOf('function ' + fn + '(') !== -1, 'app.js must define ' + fn + '()');
 }
-assert.ok(app.indexOf('Aerial (Esri)') !== -1, 'map must offer the Esri aerial layer');
-assert.ok(app.indexOf('stamen_toner') !== -1, 'map must offer the Stamen B&W layer');
-assert.ok(app.indexOf('maxNativeZoom') !== -1, 'map must upscale tiles past native zoom');
+const basemaps = readFileSync(new URL('../map-basemaps.js', import.meta.url), 'utf8');
+assert.ok(basemaps.includes('World_Imagery'), 'maps must offer Esri aerial imagery');
+for (const name of ['Light gray', 'Dark gray']) assert.ok(basemaps.includes(name), `maps must offer ${name}`);
+assert.ok(basemaps.includes('maxNativeZoom'), 'maps must upscale tiles past native zoom');
 // EXPORT menu + match list styling contracts.
 assert.ok(baseRule('.export-menu').indexOf('position: absolute') !== -1, '.export-menu must float');
 const matchList = baseRule('#matchList');

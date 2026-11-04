@@ -11,13 +11,17 @@ export function createGaussianLayer(data) {
   for (const [name, [, size]] of Object.entries(fields)) geometry.setAttribute(name, new THREE.InstancedBufferAttribute(new Float32Array(count*size), size));
   const material = new THREE.ShaderMaterial({
     transparent: true, depthWrite: false, depthTest: true,
-    uniforms: {viewport: {value: new THREE.Vector2(1,1)}, brightness: {value: 1}, sizeMultiplier: {value: 1}},
+    uniforms: {viewport: {value: new THREE.Vector2(1,1)}, brightness: {value: 1}, sizeMultiplier: {value: 1},
+      colorMode: {value: 0}, heightAxis: {value:new THREE.Vector3(0,-1,0)}, scalarRange: {value:new THREE.Vector2(0,1)}},
     vertexShader: `
       attribute vec3 mean, scale, tint;
       attribute vec4 rotation;
       attribute float alpha;
       uniform vec2 viewport;
       uniform float sizeMultiplier;
+      uniform float colorMode;
+      uniform vec3 heightAxis;
+      uniform vec2 scalarRange;
       varying vec2 gaussianUV;
       varying vec3 gaussianColor;
       varying float gaussianAlpha;
@@ -26,6 +30,13 @@ export function createGaussianLayer(data) {
         vec4 clip = projectionMatrix * center;
         gaussianUV = position.xy * 3.0;
         gaussianColor = tint; gaussianAlpha = alpha;
+        if(colorMode>0.5) {
+          float scalar = colorMode<1.5 ? dot(mean,heightAxis) : distance(mean,cameraPosition);
+          float t=clamp((scalar-scalarRange.x)/max(scalarRange.y-scalarRange.x,0.000001),0.,1.);
+          float hue=(colorMode<1.5 ? 1.-t : t)*0.66;
+          vec3 p=abs(fract(vec3(hue)+vec3(0.,2./3.,1./3.))*6.-3.);
+          gaussianColor=mix(vec3(1.),clamp(p-1.,0.,1.),0.8)*0.9;
+        }
         if (center.z >= -0.001) { gl_Position = vec4(2.,2.,2.,1.); return; }
         vec4 q = normalize(rotation); // DA3 order wxyz
         float w=q.x, x=q.y, y=q.z, z=q.w;
@@ -72,6 +83,11 @@ export function createGaussianLayer(data) {
     const signature = matrix.map(v=>v.toFixed(5)).join(",");
     if (signature === last) return;
     last = signature;
+    if(material.uniforms.colorMode.value===2) {
+      let min=Infinity,max=-Infinity;
+      for(const p of data.means) {const d=Math.hypot(p[0]-camera.position.x,p[1]-camera.position.y,p[2]-camera.position.z);min=Math.min(min,d);max=Math.max(max,d);}
+      material.uniforms.scalarRange.value.set(min,max);
+    }
     for (let i=0;i<count;i++) { const p=data.means[i]; depths[i]=matrix[2]*p[0]+matrix[6]*p[1]+matrix[10]*p[2]+matrix[14]; }
     indices.sort((a,b)=>depths[a]-depths[b]);
     for (const [name,[source,size]] of Object.entries(fields)) {
@@ -82,5 +98,18 @@ export function createGaussianLayer(data) {
   }
   return {mesh, update, setBrightness(value) {material.uniforms.brightness.value=value;},
     setSize(value) {material.uniforms.sizeMultiplier.value=value;},
+    setColorMode(mode,axis) {
+      const code=mode==="height" ? 1 : mode==="distance" ? 2 : 0;
+      const oldAxis=material.uniforms.heightAxis.value;
+      if(material.uniforms.colorMode.value===code && oldAxis.x===axis[0] && oldAxis.y===axis[1] && oldAxis.z===axis[2]) return;
+      material.uniforms.colorMode.value=code;
+      material.uniforms.heightAxis.value.fromArray(axis);
+      if(mode==="height") {
+        let min=Infinity,max=-Infinity;
+        for(const p of data.means) {const h=p[0]*axis[0]+p[1]*axis[1]+p[2]*axis[2];min=Math.min(min,h);max=Math.max(max,h);}
+        material.uniforms.scalarRange.value.set(min,max);
+      }
+      last="";
+    },
     dispose() {geometry.dispose();material.dispose();}};
 }

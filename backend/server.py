@@ -635,8 +635,14 @@ async def sfm(
     use_gpu: str = Form(default="1"),
     sam_token: str = Form(default=""),
     label_objects: str = Form(default="0"),
+    reconstruction_engine: str = Form(default="colmap"),
 ):
-    """Reconstruct a zip of photos with COLMAP and label the 3D points.
+    """Reconstruct a photo ZIP with COLMAP or DA3 and label the 3D points.
+
+    `reconstruction_engine`: colmap (default), da3-small or da3-giant.
+    DA3 choices do not require COLMAP; all choices share EXIF alignment
+    and the viewer response contract. DA3 Small/Giant scale is relative
+    until a multi-photo EXIF GPS similarity fit is available.
 
     Multipart fields: `zipfile` (zip archive of photos), `detections`
     (optional JSON mapping image filename to
@@ -663,6 +669,8 @@ async def sfm(
 
     from fastapi.responses import JSONResponse
     import sfm as sfm_mod
+    if reconstruction_engine not in ("colmap", "da3-small", "da3-giant"):
+        return JSONResponse(status_code=400, content={"error": "Unknown reconstruction engine", "cameras": []})
 
     try:
         raw = await zipfile.read()
@@ -684,10 +692,10 @@ async def sfm(
         "0", "false", "no", "off")
     gpu_used = bool(want_gpu and sfm_mod.gpu_available())
     warnings = []
-    if want_gpu and not gpu_used:
+    if want_gpu and not gpu_used and reconstruction_engine == "colmap":
         warnings.append("no GPU detected: COLMAP runs on CPU")
 
-    if not sfm_mod.sfm_backend_available():
+    if reconstruction_engine == "colmap" and not sfm_mod.sfm_backend_available():
         return JSONResponse(status_code=503, content={
             "error": "colmap not installed: install the COLMAP CLI "
                      "(https://colmap.github.io) or `pip install pycolmap` "
@@ -808,6 +816,13 @@ async def sfm(
                                      "for reconstruction",
                             "cameras": [], "gpu_used": gpu_used,
                             "warnings": warnings}
+                if reconstruction_engine != "colmap":
+                    from photo_cloud import reconstruct as reconstruct_da3_photos
+                    return reconstruct_da3_photos(
+                        reconstruction_engine, img_dir, kept, photo_locations,
+                        clean_thumbnails, orientations, names_in, want_labels,
+                        detector, sam_token, detect_concepts_no_depth, emit,
+                        warnings=warnings, detections=dets, force_cpu=not want_gpu)
                 model_dir, run_warnings = sfm_mod.reconstruct(
                     img_dir, workspace, gpu_used, emit)
                 warnings.extend(run_warnings)
@@ -896,6 +911,7 @@ async def sfm(
                         dense_labels = {str(k): v for k, v in sfm_mod.vote_point_labels_numpy(d_pts, cameras, dets).items()}
                 return {
                     "ply": ply_text,
+                    "engine": "colmap", "model": "COLMAP Dense" if dense_ply else "COLMAP Sparse",
                     "point_count": len(points),
                     "total_points": total,
                     # Per-image SAM/CLIP boxes that fed label voting
@@ -975,7 +991,8 @@ async def sfm(
 
 @app.post("/api/video-cloud")
 async def video_cloud(
-    zipfile: UploadFile = File(...),
+    zipfile: UploadFile = File(default=None),
+    video: UploadFile = File(default=None),
     concepts: str = Form(default="[]"),
     geoms: str = Form(default=""),
     detector: str = Form(default="sam"),
@@ -1016,7 +1033,7 @@ async def video_cloud(
     except ValueError:
         lonf = None
     try:
-        mf = max(1, min(120, int(max_frames or 16)))
+        mf = max(1, min(250, int(max_frames or 16)))
     except ValueError:
         mf = 16
     try:
@@ -1029,7 +1046,19 @@ async def video_cloud(
             sampling_rate = 10.
     except ValueError:
         sampling_rate = 10.
-    data = await zipfile.read()
+    if video is not None:
+        video_bytes = await video.read()
+        if len(video_bytes) > MAX_BATCH_BYTES:
+            return {"error": "Video exceeds the upload limit"}
+        import zipfile as video_zip
+        archive = io.BytesIO()
+        with video_zip.ZipFile(archive, "w") as packed:
+            packed.writestr(os.path.basename(video.filename or "clip.mp4"), video_bytes)
+        data = archive.getvalue()
+    elif zipfile is not None:
+        data = await zipfile.read()
+    else:
+        return {"error": "Upload a video or photo/video ZIP"}
     if len(data) > MAX_BATCH_BYTES:
         return {"error": (f"zip too large ({len(data) / 1e6:.0f} MB, "
                           f"max {MAX_BATCH_BYTES / 1e6:.0f} MB)")}
@@ -1064,7 +1093,7 @@ async def video_cloud(
                                      for i in infos)) or "(none)"
             return {"error": "zip holds no video (mp4/mov/avi/mkv/webm); "
                              f"found: {names}", "warnings": warnings}
-        if photo_info is None:
+        if photo_info is None and video is None:
             return {"error": "zip holds no photo (jpg/png) with EXIF",
                     "warnings": warnings}
         tmp = tempfile.mkdtemp(prefix="mg-video-")
@@ -1072,15 +1101,15 @@ async def video_cloud(
             vpath = os.path.join(tmp, os.path.basename(video_info.filename))
             with open(vpath, "wb") as fh:
                 fh.write(zf.read(video_info))
-            photo = geo.oriented_image(
-                Image.open(io.BytesIO(zf.read(photo_info))).convert("RGB"))
-            location, gps_source = geo.resolve_location(
-                latf, lonf, photo, prefer=prefer or "exif")
-            heading_deg, heading_source = geo.resolve_heading(
-                heading, photo)
-            emit(f"Photo {photo_info.filename}: "
-                 f"{location and (round(location['lat'], 5), round(location['lon'], 5))} "
-                 f"({gps_source}); heading {heading_deg} ({heading_source})")
+            location, gps_source, heading_deg, heading_source = None, "manual control points", None, None
+            if photo_info is not None:
+                photo = geo.oriented_image(
+                    Image.open(io.BytesIO(zf.read(photo_info))).convert("RGB"))
+                location, gps_source = geo.resolve_location(
+                    latf, lonf, photo, prefer=prefer or "exif")
+                heading_deg, heading_source = geo.resolve_heading(heading, photo)
+            else:
+                emit("Video-only reconstruction: use cloud/map control points to register the result.")
 
             extraction = {}
             frames = da3_mod.extract_frames(vpath, tmp, max_frames=mf,
@@ -1170,11 +1199,25 @@ async def video_cloud(
                     "to place them on the map.")
 
             from georeference import video_reference
+            import base64
+            import math
+            source_frames = []
+            for i, image in enumerate(scene["processed"]):
+                thumb = image.copy()
+                thumb.thumbnail((960, 720))
+                buffer = io.BytesIO()
+                thumb.save(buffer, format="JPEG", quality=82)
+                source_frames.append({"image": names[i], "time_s": frames[i].get("time_s"),
+                    "url": "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii"),
+                    "depth": [round(float(d), 3) if math.isfinite(float(d)) else 0
+                              for d in Image.fromarray(scene["depth"][i]).resize((32, 32), Image.Resampling.NEAREST).getdata()]})
             return {
                 "ply": sfm_mod.write_ply_ascii(points, colors),
                 "gaussians": scene.get("gaussians"),
                 "georeference": video_reference(scene, location, heading_deg),
                 "cameras": cameras,
+                "source_frames": source_frames,
+                "metric": bool(scene.get("is_metric")),
                 "diagnostics": diagnostics,
                 "point_labels": {str(k): {"label": v["label"],
                                           "votes": v.get("votes", 0)}

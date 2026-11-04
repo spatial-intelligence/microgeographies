@@ -107,7 +107,7 @@ export function buildGeoJson(pos, col, labels, votes, idx, georeference = null) 
   const feats = idx.map((i) => ({
     type: "Feature",
     geometry: georeference ? { type: "Point",
-      coordinates: geographicPoint(pos, i, georeference) } : null,
+      coordinates: geographicPoint(pos, i, georeference).slice(0, georeference.altitude_known === false ? 2 : 3) } : null,
     properties: {
       local_xyz: [pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]],
       label: labels[i] || "unlabeled",
@@ -124,4 +124,5 @@ export { createViewer } from "./slam-viewer.js";
 export { attachBookmarks } from "./viewer-bookmarks.js";
 export { geographicPoint } from "./geo-cloud.js";
 export { createCloudMapLayer } from "./geo-cloud.js";
+export { buildMappedFeatures, addMappedFeaturesToMap } from "./geo-cloud.js";
 import { geographicPoint } from "./geo-cloud.js";
