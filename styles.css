@@ -1406,6 +1406,11 @@ body[data-mode="video-survey"] .viewer-help { margin:4px 0 0; }
 .tool-window-body .row { display:flex; align-items:center; gap:6px; }
 .tool-window-body .hint,.tool-window-body p { font-size:12px; }
 .tool-window-body button { font-size:12px; padding:6px 9px; margin:3px; }
+.tool-window.measure-popover { min-width:0; min-height:0; resize:none; }
+.measure-popover .tool-window-header { padding:5px 8px; gap:8px; cursor:default; font-size:12px; }
+.measure-popover .tool-window-body { padding:8px; }
+.measure-popover .tool-window-body p { margin:0 0 6px; line-height:1.4; }
+.measure-popover .tool-window-body button { margin:0; padding:4px 7px; }
 .tool-window.survey-window { display:none; }
 body[data-mode="video-survey"][data-view="workflow"] .tool-window.survey-window { display:flex; }
 .coordinate-fields { display:grid; grid-template-columns:1fr 1fr; gap:8px; }

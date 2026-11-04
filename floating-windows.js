@@ -1,6 +1,6 @@
 let topLayer=1200;
 
-export function createToolWindow({id,title,content,width=390,left=24,top=100,className='',onClose=null}) {
+export function createToolWindow({id,title,content,width=390,left=24,top=100,className='',onClose=null,anchored=false}) {
   const panel=document.createElement('section');panel.id=id;panel.className=`tool-window ${className}`;
   panel.hidden=true;panel.setAttribute('role','dialog');panel.setAttribute('aria-label',title);panel.setAttribute('aria-modal','false');
   panel.style.width=`${width}px`;panel.style.left=`${left}px`;panel.style.top=`${top}px`;
@@ -11,14 +11,24 @@ export function createToolWindow({id,title,content,width=390,left=24,top=100,cla
   header.append(heading,close);panel.append(header,body);document.body.append(panel);
   const raise=()=>panel.style.zIndex=++topLayer;
   function constrain(){const r=panel.getBoundingClientRect();panel.style.left=`${Math.max(0,Math.min(parseFloat(panel.style.left)||0,innerWidth-Math.min(r.width,innerWidth)))}px`;const y=Math.max(0,Math.min(parseFloat(panel.style.top)||0,innerHeight-100));panel.style.top=`${y}px`;panel.style.maxHeight=`${innerHeight-y-8}px`;}
-  let drag=null;
-  header.addEventListener('pointerdown',e=>{if(e.button!==0||e.target.closest('button'))return;const r=panel.getBoundingClientRect();drag={x:e.clientX,y:e.clientY,left:r.left,top:r.top};header.setPointerCapture(e.pointerId);raise();e.preventDefault();});
+  let drag=null,anchor=null,frame=null;
+  function followAnchor(){
+    frame=null;if(panel.hidden||!anchor)return;
+    if(!anchor.isConnected||!anchor.getClientRects().length){hide();return;}
+    const a=anchor.getBoundingClientRect(),r=panel.getBoundingClientRect(),gap=6;
+    const above=a.top-r.height-gap;
+    panel.style.left=`${Math.max(8,Math.min(a.left,innerWidth-r.width-8))}px`;
+    panel.style.top=`${Math.max(8,above>=8?above:Math.min(a.bottom+gap,innerHeight-r.height-8))}px`;
+    frame=requestAnimationFrame(followAnchor);
+  }
+  function hide(){panel.hidden=true;if(frame!==null)cancelAnimationFrame(frame);frame=null;anchor=null;}
+  header.addEventListener('pointerdown',e=>{if(anchored||e.button!==0||e.target.closest('button'))return;const r=panel.getBoundingClientRect();drag={x:e.clientX,y:e.clientY,left:r.left,top:r.top};header.setPointerCapture(e.pointerId);raise();e.preventDefault();});
   header.addEventListener('pointermove',e=>{if(!drag)return;panel.style.left=`${drag.left+e.clientX-drag.x}px`;panel.style.top=`${drag.top+e.clientY-drag.y}px`;constrain();});
   const end=()=>drag=null;header.addEventListener('pointerup',end);header.addEventListener('pointercancel',end);
-  panel.addEventListener('pointerdown',raise);close.onclick=()=>{if(onClose)onClose();else panel.hidden=true;};
+  panel.addEventListener('pointerdown',raise);close.onclick=()=>{if(onClose)onClose();else hide();};
   window.addEventListener('resize',constrain);
-  return {element:panel,show(){panel.hidden=false;constrain();raise();},hide(){panel.hidden=true;},
+  return {element:panel,show(source){hide();anchor=anchored?source:null;panel.hidden=false;constrain();raise();if(anchor)followAnchor();},hide,
     getLayout(){return {left:panel.style.left,top:panel.style.top,width:panel.style.width,height:panel.style.height};},
-    setLayout(layout){for(const k of ['left','top','width','height'])if(/^\d+(\.\d+)?px$/.test(layout?.[k]||''))panel.style[k]=layout[k];constrain();},
-    dispose(){window.removeEventListener('resize',constrain);panel.remove();}};
+    setLayout(layout){if(anchored)return;for(const k of ['left','top','width','height'])if(/^\d+(\.\d+)?px$/.test(layout?.[k]||''))panel.style[k]=layout[k];constrain();},
+    dispose(){hide();window.removeEventListener('resize',constrain);panel.remove();}};
 }

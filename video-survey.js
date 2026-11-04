@@ -66,7 +66,7 @@ export function createVideoSurvey({host,getContext,onReference,onTags}) {
       <button id="surveyCancelEdit" hidden>Cancel point edit</button><ol id="surveyControls"></ol>
       <button id="surveyRegister">Register cloud on map</button><button id="surveyUndo">Undo pair</button>
     </section>
-    <section id="surveyMeasurePanel"><p>Click two cloud points in either view. The segment and distance appear in both views.</p><button id="surveyClearMeasure">Clear measurement</button></section>
+    <section id="surveyMeasurePanel"><p>Click two cloud points to measure their distance.</p><button id="surveyClearMeasure">Clear measurement</button></section>
     <section id="surveyTagPanel"><p>Click a cloud point to create a tag, or choose Edit on an existing tag. Map tags can also be dragged or clicked to edit.</p>
       <form id="surveyTagForm" hidden><label>Name / type<input id="surveyTagName" required maxlength="160" placeholder="Printer, bin, office"></label>
       <div class="coordinate-fields" id="surveyTagCoords"><label>Latitude<input id="surveyTagLat" type="number" min="-85" max="85" step="any" required></label><label>Longitude<input id="surveyTagLon" type="number" min="-180" max="180" step="any" required></label></div>
@@ -81,8 +81,8 @@ export function createVideoSurvey({host,getContext,onReference,onTags}) {
   const $=id=>document.getElementById(id);let controls=[],tags=[],pending=null,selected=null,measurement=[],photos=[],photoIndex=0,tool='orbit',map=null,mapHandler=null,controlLayer=null,editing=null,editingTag=null;
   const windows={};
   for(const [key,id,title] of [['control','surveyRegisterPanel','Georeference'],['measure','surveyMeasurePanel','Measure'],['tag','surveyTagPanel','Tags'],['photos','surveyPhotos','Source photos']]){
-    windows[key]=createToolWindow({id:'surveyWindow-'+key,title,content:$(id),width:key==='photos'?420:410,
-      left:Math.max(12,innerWidth-(key==='photos'?440:430)),top:key==='photos'?110:Math.max(90,innerHeight*.52),className:'survey-window'});
+    windows[key]=createToolWindow({id:'surveyWindow-'+key,title,content:$(id),width:key==='measure'?230:key==='photos'?420:410,anchored:key==='measure',
+      left:Math.max(12,innerWidth-(key==='photos'?440:430)),top:key==='photos'?110:Math.max(90,innerHeight*.52),className:'survey-window'+(key==='measure'?' measure-popover':'')});
   }
   const status=text=>{$('surveyStatus').textContent=text;};
   const review=createSurveyReview({host,getContext,getTags:()=>tags,
@@ -107,7 +107,7 @@ export function createVideoSurvey({host,getContext,onReference,onTags}) {
     if(index===0)$('surveyAltitude').value='';
     changed('Control point deleted.');
   }
-  function setTool(value){tool=value;cancelEdit();eachViewer(viewer=>viewer.setTool(value));host.querySelectorAll('[data-tool]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.tool===value)));$('surveyPhotos').hidden=value!=='photos';$('surveyTagForm').hidden=true;Object.values(windows).forEach(w=>w.hide());windows[value]?.show();renderControls();status(value==='identify'?'Click a point in either 3D view to see its class.':value==='control'?'Click a point in the cloud, then its map position.':`Click a cloud point to ${value==='tag'?'create a tag':value==='measure'?'measure a distance':value==='photos'?'find source frames':'navigate'}.`);}
+  function setTool(value,source){tool=value;cancelEdit();eachViewer(viewer=>viewer.setTool(value));host.querySelectorAll('[data-tool]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.tool===value)));$('surveyPhotos').hidden=value!=='photos';$('surveyTagForm').hidden=true;Object.values(windows).forEach(w=>w.hide());windows[value]?.show(source);renderControls();status(value==='identify'?'Click a point in either 3D view to see its class.':value==='control'?'Click a point in the cloud, then its map position.':`Click a cloud point to ${value==='tag'?'create a tag':value==='measure'?'measure a distance':value==='photos'?'find source frames':'navigate'}.`);}
   host.querySelectorAll('[data-tool]').forEach(b=>b.onclick=()=>setTool(b.dataset.tool));
   function renderControls(){
     if(map && window.L){

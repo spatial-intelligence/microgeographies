@@ -180,7 +180,7 @@ function createCloudView(host, positions, rgb, classes, labels, votes, state, ca
     if(['photos','tag'].includes(tool)&&!['videoView','videoSecondView'].includes(host.id))continue;
     const button=document.createElement('button');button.type='button';button.className='viewer-direct-tool viewer-tool-'+tool;button.innerHTML=`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${toolIcons[tool]}</svg><span class="viewer-tool-label">${text}</span>`;button.setAttribute('aria-label',aria);button.title=aria;toolstrip.append(button);toolButtons.push({button,tool});
     if(tool==='identify')button.className+=' viewer-identify-button';
-    button.onclick=()=>{state.tool=state.tool===tool?'orbit':tool;syncTool();if(host.dispatchEvent&&typeof CustomEvent!=='undefined')host.dispatchEvent(new CustomEvent('viewer-tool-change',{detail:{tool:state.tool}}));};
+    button.onclick=()=>{state.tool=state.tool===tool?'orbit':tool;syncTool();if(host.dispatchEvent&&typeof CustomEvent!=='undefined')host.dispatchEvent(new CustomEvent('viewer-tool-change',{detail:{tool:state.tool,anchor:button}}));};
   }
   function syncTool(){identify.clear();toolButtons.forEach(({button,tool})=>button.setAttribute('aria-pressed',String(state.tool===tool)));}
   function setMeasurement(indices,scale=1){measurement.set(indices,true,scale);pickStatus.hidden=!indices.length;

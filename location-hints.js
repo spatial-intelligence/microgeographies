@@ -8,7 +8,37 @@
     if(!response.ok)throw Error(typeof result.detail==='string'?result.detail:`Frame previews failed (HTTP ${response.status}).`);
     return result.frames||[];
   }
-  window.MGLocationHints={extractVideoFrames,create({getMap,getData,onChange,isSurvey=()=>true,getVideoFile=()=>null,getToken=()=>'',extractFrames=extractVideoFrames}){
+  function createPhoto({getImage,getToken,onSelect}){
+    const $=id=>document.getElementById(id),button=$('photoEstimateLocation'),panel=$('photoLocationHints'),status=$('photoLocationHintStatus'),choices=$('photoLocationHintChoices');
+    let controller=null,generation=0;
+    const show=()=>{if(!panel.open)panel.showModal();};
+    function reset(){generation++;controller?.abort();controller=null;button.hidden=true;button.disabled=true;choices.replaceChildren();status.textContent='';if(panel.open)panel.close();}
+    button.onclick=async()=>{
+      show();const token=getToken().trim();
+      if(!token){status.textContent='Add a Meta API key in Settings, then click Estimate location again.';return;}
+      const image=getImage();if(!image){status.textContent='Wait for the photo to finish loading.';return;}
+      if(controller)return;
+      const request=new AbortController(),version=generation;controller=request;button.disabled=true;choices.replaceChildren();status.textContent='Estimating the photo location with Spark...';
+      try{
+        const response=await fetch('/api/location-hint',{method:'POST',headers:{'Content-Type':'application/json'},signal:request.signal,body:JSON.stringify({image,token})});
+        const data=await response.json().catch(()=>({}));
+        if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:`Location lookup failed (HTTP ${response.status}).`);
+        if(version!==generation)return;
+        const candidates=(data.candidates||[]).filter(c=>Number.isFinite(c.lat)&&Math.abs(c.lat)<=85&&Number.isFinite(c.lon)&&Math.abs(c.lon)<=180);
+        choices.replaceChildren(...candidates.map(candidate=>{
+          const item=document.createElement('li'),use=document.createElement('button'),detail=document.createElement('p');
+          use.type='button';use.textContent=`Use ${candidate.name}`;
+          detail.textContent=`${candidate.lat.toFixed(5)}, ${candidate.lon.toFixed(5)} | ${candidate.confidence} confidence. ${candidate.reason}`;
+          use.onclick=()=>{onSelect(candidate);panel.close();};item.append(use,detail);return item;
+        }));
+        status.textContent=candidates.length?'Choose a suggested location after checking its landmarks. You can correct it by dragging the camera marker on the map.':'No location could be identified from this photo. Enter its location using Location & heading.';
+      }catch(error){if(version===generation)status.textContent=error.name==='AbortError'?'Location lookup stopped.':error.message;}
+      finally{if(controller===request){controller=null;button.disabled=false;}}
+    };
+    $('photoLocationHintClose').onclick=()=>panel.close();
+    return {reset,setAvailable(available){button.hidden=!available;button.disabled=!available||!!controller;}};
+  }
+  window.MGLocationHints={extractVideoFrames,createPhoto,create({getMap,getData,onChange,isSurvey=()=>true,getVideoFile=()=>null,getToken=()=>'',extractFrames=extractVideoFrames}){
     const $=id=>document.getElementById(id),panel=$('videoLocationHints'),status=$('videoLocationHintStatus'),list=$('videoLocationHintChoices');
     let result=null,layer=null,controller=null,previewController=null,generation=0,attempted=false,autoCentered=false,observedMap=null,dismissed=false,currentFrame=null;
     const notice=text=>{status.textContent=text;$('videoLocationHintsBar').hidden=!isSurvey();$('videoLocationHintSummary').textContent=text.length>120?text.slice(0,117)+'...':text;};

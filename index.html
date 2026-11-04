@@ -178,6 +178,7 @@
       <input type="file" id="fileInput" accept="image/*">
       <p class="hint">Upload a photo. Its EXIF location and direction are used for mapping.</p>
       <p id="exifOut">No photo yet.</p>
+      <button type="button" id="photoEstimateLocation" hidden disabled>Estimate location</button>
       <button type="button" id="locBtn">Location &amp; heading…</button>
       <p class="hint" id="locState">Location: photo EXIF, or enter a correction.</p>
     </section>
@@ -625,6 +626,12 @@
   <div id="hoverTip" hidden></div>
 
   <script src="config.js"></script>
+  <dialog id="photoLocationHints" class="mg-dlg" aria-labelledby="photoLocationHintTitle">
+    <div class="dlg-head"><h2 id="photoLocationHintTitle">Estimate photo location</h2><button type="button" id="photoLocationHintClose">Close</button></div>
+    <p class="hint">Spark uses visible landmarks to suggest places. Locations are approximate. Heading is set separately in Location &amp; heading.</p>
+    <p id="photoLocationHintStatus" role="status"></p>
+    <ul id="photoLocationHintChoices"></ul>
+  </dialog>
   <script src="exif.js"></script>
   <script src="sam3local.js"></script>
   <script src="mobilenet.js"></script>

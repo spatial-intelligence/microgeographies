@@ -103,22 +103,26 @@
   // EXIF preview at load time: says what the photo carries and what the
   // backend will therefore use, before anything is sent.
   function previewExif(file) {
+    photoLocationHints.reset();
     exifOut.textContent = "Reading photo metadata…";
     if (/heic|heif/i.test(file.type) || /\.hei[cf]$/i.test(file.name || "")) {
+      photoLocationHints.setAvailable(true);
       sayExif("HEIC photo — direction/location tags can't be read here. Convert to JPEG first, or enter the photo location and heading manually.");
       return;
     }
     file.arrayBuffer().then((buf) => {
+      if(file!==fileBlob)return;
       const ex = window.MG_EXIF ? window.MG_EXIF.parseGPS(buf) : null;
+      photoLocationHints.setAvailable(ex?.lat==null||ex?.lon==null);
       if (!ex || !ex.hasExif) {
-        sayExif("No EXIF in this photo (screenshot, PNG, or stripped upload) — enter its location and heading using Location & heading.");
+        sayExif("No EXIF in this photo (screenshot, PNG, or stripped upload) — use Estimate location or enter its location and heading using Location & heading.");
         return;
       }
       const bits = [];
       if (ex.lat != null && ex.lon != null) bits.push(`location ${ex.lat.toFixed(6)}, ${ex.lon.toFixed(6)}`);
       if (ex.heading != null) bits.push(`heading ${ex.heading}°`);
       if (!bits.length) {
-        sayExif("Photo has EXIF but no GPS location — enter its location and heading using Location & heading.");
+        sayExif("Photo has EXIF but no GPS location — use Estimate location or enter its location and heading using Location & heading.");
         return;
       }
       const used = [];
@@ -126,6 +130,8 @@
       if (ex.heading != null && currentHeading() == null) used.push("heading");
       sayExif(`Photo EXIF holds ${bits.join(" + ")} — will be used (${used.join(" + ")}), not this computer's.`);
     }).catch(() => {
+      if(file!==fileBlob)return;
+      photoLocationHints.setAvailable(true);
       sayExif("Could not read photo metadata — enter the photo location and heading manually.");
     });
   }
@@ -185,6 +191,16 @@
   document.querySelectorAll('input[name="samBackend"]').forEach(el=>el.addEventListener('change',()=>$("singleDetectorChoice").value=samBackend()));
   const exifOut = $("exifOut");
   const manualLat = $("manualLat"), manualLon = $("manualLon");
+  const photoLocationHints=window.MGLocationHints.createPhoto({
+    getImage:()=>imgEl?prepareImage(imgEl,960).dataUrl:null,
+    getToken:()=>tokenInput.value,
+    onSelect:candidate=>{
+      manualLat.value=String(candidate.lat);manualLon.value=String(candidate.lon);
+      refreshLocState();renderMap();
+      locState.textContent=`Location: estimated near ${candidate.name} (${candidate.confidence} confidence). Check the map and set heading in Location & heading.`;
+      setStatus('Estimated location selected. Send or Re-project to apply it to map pins.');
+    }
+  });
 
   // Depth backend override (monocular range). Auto = Depth Anything
   // unless a YOLO weight is named; persisted like the SAM prefs.
@@ -319,6 +335,7 @@
     const f = fileInput.files[0];
     if (!f) return;
     fileBlob = f;
+    imgEl = null;
     // A manual location override belongs to the photo it was made for:
     // a drag-correction from a previous image must not silently hijack
     // this photo's EXIF (it sent prefer=manual, so Re-project kept the
@@ -333,6 +350,7 @@
     const url = URL.createObjectURL(f);
     const img = new Image();
     img.onload = () => {
+      if(f!==fileBlob){URL.revokeObjectURL(url);return;}
       imgEl = img; URL.revokeObjectURL(url); boxes = []; sentSize = null;
       origBoxes = [];
       lastDepth = null;
@@ -2149,7 +2167,7 @@
     videoViewer?.setCamerasVisible($("videoShowCameras").checked);
     videoSecondViewer?.setCamerasVisible($("videoShowCameras").checked);
   });
-  [$("videoView"),$("videoSecondView")].forEach(host=>host.addEventListener('viewer-tool-change',e=>{if(currentMode()==='video-survey'&&videoSurvey)videoSurvey.setTool(e.detail.tool);else [videoViewer,videoSecondViewer].forEach(view=>view?.setTool(e.detail.tool));}));
+  [$("videoView"),$("videoSecondView")].forEach(host=>host.addEventListener('viewer-tool-change',e=>{if(currentMode()==='video-survey'&&videoSurvey)videoSurvey.setTool(e.detail.tool,e.detail.anchor);else [videoViewer,videoSecondViewer].forEach(view=>view?.setTool(e.detail.tool));}));
   $("videoDensify").oninput=()=>{const multiplier=$("videoDensify").value;$("videoDensifyVal").textContent='x'+multiplier;videoViewer?.setDensify(multiplier);videoSecondViewer?.setDensify(multiplier);};
   $("videoView").addEventListener('viewer-display-change',e=>{const d=e.detail;$("videoRenderMode").value=d.mode;$("videoDensify").value=d.densify;$("videoDensifyVal").textContent='x'+d.densify;$("videoDensify").disabled=d.mode!=='points';$("videoGeometryInfo").textContent=geometrySummary(d);});
   $("videoPointSize").addEventListener("input", () => {
