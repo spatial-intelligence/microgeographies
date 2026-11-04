@@ -1,3 +1,13 @@
+### Version 0.38 - complete mapped region features
+
+Region GeoJSON now requests all OpenStreetMap nodes, ways and relations in the selected region, including buildings, mapped doors and entrances, amenities, shops, barriers, roads and paths. The export preserves original tags as flat properties for Single photo matching, and uses osmtogeojson 3.0.0-beta.5 (MIT, vendored with its license) to preserve building polygons, multipolygon courtyards and route lines. Click preview features to inspect their tags. Doors and indoor details are included only where recorded in OpenStreetMap; geometry marked `tainted` is reported as incomplete. Large regions may require a closer zoom. Complete ways and relations can extend beyond the view. The visible app and offline cache are v0.38.
+
+### Version 0.37 - download region roads and paths as GeoJSON
+
+Home now includes **Download region GeoJSON**. Pan and zoom the map (or enter latitude/longitude), then load roads and paths in the visible region. The tool queries OpenStreetMap via Overpass, previews the results and downloads a tagged GeoJSON FeatureCollection. Complete ways may extend outside the selected bounds. Select a region less than 20 km across in each direction; loading needs internet access.
+
+Use **Download GeoJSON** to save a reusable file, or **Use in Single photo** to load the roads directly and enable snapping. For saved files, open **Single photo → Map match → OSM area GeoJSON**, upload the file and enable **Snap to path**. Exports retain highway tags for roads, footpaths, cycleways, tracks and steps, along with OpenStreetMap attribution. The app and offline shell cache are v0.37.
+
 ### Version 0.36 - synthetic density multipliers to x1000
 
 Synthetic densification now uses an added-point multiplier from x0 (off) to x1000, rather than percentages. x1 requests one added point per original, x10 requests ten, and x1000 requests a thousand. The boundary-aware generator still caps each preview at 2 million additions, and may reject unsupported gaps; the UI shows the actual added density and announces the cap. Existing saved projects migrate their percentage settings to equivalent multipliers on load, preserving their previous appearance.

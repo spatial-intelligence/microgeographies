@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>MicroGeo Tool v0.36</title>
+  <title>MicroGeo Tool v0.38</title>
   <meta name="description" content="Turn photos and video into mapped features and 3D point clouds. Choose a MicroGeo workflow to get started.">
   <meta name="theme-color" content="#050816" id="themeColorMeta">
   <script>
@@ -38,7 +38,7 @@
   <header class="appbar">
     <div class="appbar-row">
       <div>
-        <h1>MicroGeo Tool <span class="ver">v0.36</span></h1>
+        <h1>MicroGeo Tool <span class="ver">v0.38</span></h1>
       </div>
       <div id="videoProjectBar" class="compact-projects" hidden>
         <details id="videoProjectMenu"><summary id="videoProjectCurrent">Projects</summary>
@@ -103,12 +103,34 @@
       </div>
       <p class="landing-helper">Select a segment above, or explore the workflows below</p>
       <ul class="landing-list" aria-label="Available workflows">
-        <li><button type="button" data-workflow="single"><b>Single photo</b><span>Identify objects, estimate depth and place features on the map.</span></button></li>
-        <li><button type="button" data-workflow="set-depth"><b>Photo set → pins</b><span>Combine a collection of photos into merged map features.</span></button></li>
-        <li><button type="button" data-workflow="set-3d"><b>Photo set → 3D</b><span>Reconstruct a 3D point cloud from overlapping photos.</span></button></li>
-        <li><button type="button" data-workflow="video-survey"><b>Video to registered 3D survey</b><span>Upload a video, match cloud points to the map, measure and tag indoor or outdoor locations.</span></button></li>
-        <li><button type="button" data-workflow="set-video"><b>Photo + video → DA3 cloud</b><span>Build a point cloud and map tagged features from a video.</span></button></li>
+        <li><button type="button" data-workflow="region-download"><b>Region GeoJSON</b><span>Download buildings, entrances, roads and more.</span></button></li>
+        <li><button type="button" data-workflow="single"><b>Single photo</b><span>Detect objects, estimate depth and map pins.</span></button></li>
+        <li><button type="button" data-workflow="set-depth"><b>Photo set → pins</b><span>Merge photo features into map pins.</span></button></li>
+        <li><button type="button" data-workflow="set-3d"><b>Photo set → 3D</b><span>Build a cloud from overlapping photos.</span></button></li>
+        <li><button type="button" data-workflow="video-survey"><b>Video survey</b><span>Register, measure and tag a video cloud.</span></button></li>
+        <li><button type="button" data-workflow="set-video"><b>Photo + video → 3D</b><span>Build a DA3 cloud and map tagged features.</span></button></li>
       </ul>
+    </section>
+
+    <section class="card" id="secRegion" data-title="Download region GeoJSON" hidden>
+      <h2>Download region GeoJSON</h2>
+      <p>Pan and zoom to your area, then load all mapped features in the visible region. Click a feature to inspect its tags. Zoom in to select a smaller region.</p>
+      <form id="regionGo" class="region-actions">
+        <label>Latitude<input id="regionLat" type="number" min="-85" max="85" step="any" value="51.5074" required></label>
+        <label>Longitude<input id="regionLon" type="number" min="-180" max="180" step="any" value="-0.1278" required></label>
+        <button type="submit">Go to coordinates</button>
+      </form>
+      <div id="regionMap" aria-label="Choose a region for GeoJSON download"></div>
+      <p id="regionBounds" class="hint"></p>
+      <div class="region-actions">
+        <button type="button" id="regionLoad" class="primary">Load all features in view</button>
+        <button type="button" id="regionCancel" hidden>Cancel</button>
+        <button type="button" id="regionDownload" disabled>Download GeoJSON</button>
+        <button type="button" id="regionUse" disabled>Use in Single photo</button>
+      </div>
+      <p id="regionStatus" role="status" aria-live="polite">Choose a region, then load its mapped features.</p>
+      <p class="hint">Includes mapped buildings, entrances, doors, shops, amenities, barriers, roads, paths and other features with their original tags. Doors and indoor details are included where recorded in OpenStreetMap. Complete features may extend beyond the view; large regions may need a closer zoom. Data: <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors, ODbL</a>, via Overpass API. Loading requires an internet connection.</p>
+      <p class="hint">To use a downloaded file: open Single photo, upload it under Map match → OSM area GeoJSON, then select Snap to path.</p>
     </section>
 
     <nav class="card workflow-nav" id="workflowNav" hidden aria-label="Workflow">
@@ -571,6 +593,8 @@
   <script src="mobilenet.js"></script>
   <script src="vendor/leaflet.js"></script>
   <script src="map-basemaps.js"></script>
+  <script src="vendor/osmtogeojson.js"></script>
+  <script src="region-download.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

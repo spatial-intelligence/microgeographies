@@ -919,6 +919,9 @@
   // the two routes that need pins (single photo, batch); the 3D route
   // is COLMAP geometry with depth-free labels.
   const MODES = {
+    "region-download": { sections: ["secRegion"], title: "Download region GeoJSON",
+      note: "Download OpenStreetMap features for the visible region.",
+      blurb: "Export buildings, entrances, roads, paths and other mapped features." },
     single: { sections: ["secPhoto", "secObjects", "secResults", "secMatch", "secStage", "secExport"],
               note: "Single-photo route: detect, depth, map pin.",
               title: "Single photo",
@@ -962,7 +965,7 @@
     const vis = MODES[mode].sections;
     let n = 0;
     ["secPhoto", "secObjects", "secDetector", "secResults", "secMatch", "secStage",
-     "secSet", "secSetObjects", "secSetProcess", "secSetResults", "secSfm", "secVideo", "secExport"].forEach((id) => {
+     "secSet", "secSetObjects", "secSetProcess", "secSetResults", "secSfm", "secVideo", "secExport", "secRegion"].forEach((id) => {
       const sec = $(id);
       if (!sec) return;
       const show = vis.indexOf(id) >= 0;
@@ -1008,7 +1011,7 @@
     workflowTitle = $("workflowTitle"), workflowBlurb = $("workflowBlurb"),
     backBtn = $("backBtn");
   const ALL_SECTIONS = ["secPhoto", "secObjects", "secDetector", "secResults", "secMatch", "secStage",
-    "secSet", "secSetObjects", "secSetProcess", "secSetResults", "secSfm", "secVideo", "secExport"];
+    "secSet", "secSetObjects", "secSetProcess", "secSetResults", "secSfm", "secVideo", "secExport", "secRegion"];
   function paintWorkflowNav(mode) {
     if (workflowTitle) workflowTitle.textContent = MODES[mode].title;
     if (workflowBlurb) workflowBlurb.textContent = MODES[mode].blurb;
@@ -1038,7 +1041,17 @@
     if (workflowNav) workflowNav.hidden = true;
     document.body.dataset.view = "workflow";
     document.querySelectorAll("[data-export-workflow]").forEach(el => { el.hidden = !el.dataset.exportWorkflow.split(" ").includes(mode); });
-    requestAnimationFrame(() => { initWorkflowMaps(mode); if (mode.startsWith("set-") && mode !== "set-video") setMapSource(mode === "set-3d" ? "model" : "photos"); });
+    requestAnimationFrame(() => {
+      if (mode === "region-download") window.MGRegion.open((geojson) => {
+        const n = loadOsm(geojson);
+        snapPath.checked = true;
+        matchOut.textContent = `Region: ${n.nPoints} point(s), ${n.nLines} line/outline(s) loaded. Snap to path enabled.`;
+        updateOsm();
+        openWorkflow("single");
+      });
+      initWorkflowMaps(mode);
+      if (mode.startsWith("set-") && mode !== "set-video") setMapSource(mode === "set-3d" ? "model" : "photos");
+    });
     const nav = (opts && opts.push === false) ? "replaceState" : "pushState";
     try {
       window.history[nav]({ workflow: mode }, "", workflowUrl(mode));
@@ -2497,8 +2510,11 @@
     return pick ? `${pick}=${tags[pick]}` : "tagged feature";
   }
   function osmPopup(tags) {
-    const rows = Object.entries(tags || {}).slice(0, 8).map(([k, v]) => `${k}=${v}`).join("<br>");
-    return `<b>${osmDescribe(tags || {})}</b>` + (rows ? `<br>${rows}` : "");
+    const text = document.createElement("div");
+    text.style.whiteSpace = "pre-wrap";
+    text.textContent = osmDescribe(tags || {}) + "\n" +
+      Object.entries(tags || {}).slice(0, 8).map(([k, v]) => `${k}=${v}`).join("\n");
+    return text;
   }
 
   function isPathLine(tags) {

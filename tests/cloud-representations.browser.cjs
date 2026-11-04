@@ -17,7 +17,7 @@ const fs=require('node:fs/promises');
     await page.route('**/api/health',r=>r.fulfill({json:{}}));
     await page.route('**/api/video-cloud',r=>r.fulfill({contentType:'application/x-ndjson',body:JSON.stringify({type:'result',data:result})+'\n'}));
     await page.goto('http://127.0.0.1:9517/?workflow=video-survey');
-    assert.equal(await page.title(),'MicroGeo Tool v0.36');
+    assert.equal(await page.title(),'MicroGeo Tool v0.38');
     await page.locator('#videoOnly').setInputFiles({name:'clip.mp4',mimeType:'video/mp4',buffer:Buffer.from('stub')});await page.locator('#videoBtn').click();await page.waitForSelector('#videoView canvas');
     await page.locator('#videoDensify').fill('0.4');await page.waitForFunction(()=>Number(document.querySelector('#videoView').getAttribute('data-pseudo-count'))>0);
     assert.equal(await page.locator('#videoDensify').getAttribute('max'),'1000');assert.equal(await page.locator('#videoDensifyVal').textContent(),'?0.4');
